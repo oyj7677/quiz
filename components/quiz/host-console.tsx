@@ -154,7 +154,17 @@ async function compressImage(file: File): Promise<File> {
   });
 }
 
-export function HostConsole() {
+type HostView = "home" | "quizzes" | "rooms" | "results" | "settings";
+
+const hostNavigation: Array<{ view: HostView; href: string; label: string }> = [
+  { view: "home", href: "/host", label: "홈" },
+  { view: "quizzes", href: "/host/quizzes", label: "퀴즈 관리" },
+  { view: "rooms", href: "/host/rooms", label: "진행 중인 방" },
+  { view: "results", href: "/host/results", label: "결과" },
+  { view: "settings", href: "/host/settings", label: "설정" },
+];
+
+export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView; roomCode?: string }) {
   const [username, setUsername] = useState("ming");
   const [password, setPassword] = useState("");
   const [loggedIn, setLoggedIn] = useState(false);
@@ -163,18 +173,13 @@ export function HostConsole() {
   const [rooms, setRooms] = useState<Array<{ code: string; phase?: string; createdAt?: string }>>([]);
   const [selectedId, setSelectedId] = useState<string>("");
   const [draft, setDraft] = useState<QuizSet>(sampleQuiz);
-  const [activeCode, setActiveCode] = useState("");
+  const [activeCode, setActiveCode] = useState(() => normalizeCode(roomCode));
   const [state, setState] = useState<RoomState | null>(null);
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
   const [nextPassword, setNextPassword] = useState("");
   const [origin, setOrigin] = useState("");
-
-  const selectedQuiz = useMemo(
-    () => quizzes.find((quiz) => quiz.id === selectedId) ?? draft,
-    [draft, quizzes, selectedId],
-  );
 
   useEffect(() => {
     const id = window.setTimeout(() => setOrigin(window.location.origin), 0);
@@ -224,14 +229,18 @@ export function HostConsole() {
     }
   }
 
-  async function loadQuizzes() {
+  async function loadQuizzes(preferredId?: string) {
     const result = await quizApi.listQuizzes();
     const list = normalizeQuizList(result);
     setQuizzes(list);
 
-    if (list[0]) {
-      setSelectedId(list[0].id ?? "");
-      setDraft(list[0]);
+    const selected = list.find((quiz) => quiz.id === preferredId) ?? list[0];
+    if (selected) {
+      setSelectedId(selected.id ?? "");
+      setDraft(structuredClone(selected));
+    } else {
+      setSelectedId("");
+      setDraft(structuredClone(sampleQuiz));
     }
   }
 
@@ -262,22 +271,22 @@ export function HostConsole() {
   }, [activeCode]);
 
   useEffect(() => {
-    if (!loggedIn || !activeCode) {
+    if (!loggedIn || !activeCode || (view !== "rooms" && view !== "results")) {
       return;
     }
 
     const firstLoad = window.setTimeout(() => {
       void refreshState(activeCode);
     }, 0);
-    const id = window.setInterval(() => {
+    const id = view === "rooms" ? window.setInterval(() => {
       void refreshState(activeCode, true);
-    }, 2000);
+    }, 2000) : undefined;
 
     return () => {
       window.clearTimeout(firstLoad);
-      window.clearInterval(id);
+      if (id) window.clearInterval(id);
     };
-  }, [activeCode, loggedIn, refreshState]);
+  }, [activeCode, loggedIn, refreshState, view]);
 
   async function onLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -301,12 +310,12 @@ export function HostConsole() {
       const saved = unwrapQuiz(result);
       setDraft(saved);
       setSelectedId(saved.id ?? "");
-      await loadQuizzes();
+      await loadQuizzes(saved.id);
     }
   }
 
-  async function createRoom() {
-    const id = selectedQuiz.id ?? draft.id;
+  async function createRoom(quizId?: string) {
+    const id = quizId ?? draft.id;
 
     if (!id) {
       setNotice("방을 만들기 전에 문제 세트를 먼저 저장하세요.");
@@ -317,9 +326,7 @@ export function HostConsole() {
     const code = result?.room?.code ?? result?.code;
 
     if (code) {
-      setActiveCode(normalizeCode(code));
-      await refreshState(code);
-      await loadRooms();
+      window.location.assign(`/host/rooms/${normalizeCode(code)}`);
     }
   }
 
@@ -339,6 +346,8 @@ export function HostConsole() {
 
     if (quiz) {
       setDraft(structuredClone(quiz));
+    } else {
+      setDraft(structuredClone(sampleQuiz));
     }
   }
 
@@ -374,6 +383,9 @@ export function HostConsole() {
         setActiveCode("");
         setState(null);
       }
+      if (view === "results" && normalizeCode(roomCode) === normalized) {
+        window.location.assign("/host/results");
+      }
     }
   }
 
@@ -393,6 +405,8 @@ export function HostConsole() {
     if (result) {
       setCurrentPassword("");
       setNextPassword("");
+      setLoggedIn(false);
+      setNotice("비밀번호가 변경되었습니다. 새 비밀번호로 다시 로그인하세요.");
     }
   }
 
@@ -495,157 +509,164 @@ export function HostConsole() {
     );
   }
 
+  const runningRooms = rooms.filter((room) => room.phase !== "finished");
+  const finishedRooms = rooms.filter((room) => room.phase === "finished");
+
   return (
     <main className="min-h-screen bg-[#f7f2e8] text-zinc-950">
-      <header className="sticky top-0 z-20 border-b-2 border-zinc-950 bg-white/95 px-4 py-3 backdrop-blur sm:px-6">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3">
-          <a href="/" className="flex items-center gap-3 font-black">
+      <header className="border-b-2 border-zinc-950 bg-white px-4 pt-3 sm:px-6">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 pb-3">
+          <a href="/host" className="flex items-center gap-3 font-black">
             <span className="grid h-10 w-10 place-items-center rounded-md bg-zinc-950 text-white">벨</span>
             {BRAND_NAME} 진행자
           </a>
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              value={activeCode}
-              onChange={(event) => setActiveCode(normalizeCode(event.target.value))}
-              placeholder="방 코드"
-              className="h-10 w-28 rounded-md border border-zinc-300 px-3 text-center font-black uppercase"
-            />
-            <Button variant="outline" onClick={() => void refreshState()} disabled={busy || !activeCode}>
-              <RefreshCw aria-hidden />
-              새로고침
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => {
-                void quizApi.hostLogout().finally(() => setLoggedIn(false));
-              }}
-            >
-              <LogOut aria-hidden />
-              로그아웃
-            </Button>
-          </div>
+          <Button
+            variant="outline"
+            onClick={() => void quizApi.hostLogout().finally(() => setLoggedIn(false))}
+          >
+            <LogOut aria-hidden />
+            로그아웃
+          </Button>
         </div>
+        <nav aria-label="진행자 메뉴" className="mx-auto flex max-w-7xl gap-1 overflow-x-auto pb-2">
+          {hostNavigation.map((item) => (
+            <a
+              key={item.view}
+              href={item.href}
+              aria-current={view === item.view ? "page" : undefined}
+              className={`shrink-0 rounded-md px-4 py-2 text-sm font-black transition-colors ${
+                view === item.view ? "bg-zinc-950 text-white" : "text-zinc-600 hover:bg-[#fff0ba] hover:text-zinc-950"
+              }`}
+            >
+              {item.label}
+            </a>
+          ))}
+        </nav>
       </header>
 
-      <div className="mx-auto grid max-w-7xl gap-5 px-4 py-5 lg:grid-cols-[380px_minmax(0,1fr)] lg:px-6">
-        <aside className="space-y-5">
-          <section className="rounded-md border-2 border-zinc-950 bg-white p-4 shadow-[6px_6px_0_#18181b]">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h1 className="text-xl font-black">문제 세트</h1>
-                <p className="mt-1 text-sm text-zinc-600">저장한 세트를 선택해 방을 만듭니다.</p>
+      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
+        {notice ? <p role="status" className="mb-5 rounded-md border border-[#e8b835] bg-[#fff4d0] p-3 text-sm font-bold">{notice}</p> : null}
+
+        {view === "home" ? (
+          <div className="space-y-6">
+            <section className="rounded-md border-2 border-zinc-950 bg-[#ffcf4a] p-6 shadow-[7px_7px_0_#18181b] sm:p-8">
+              <p className="text-sm font-black">진행자 홈</p>
+              <h1 className="mt-2 text-3xl font-black sm:text-4xl">오늘의 골든벨을 준비하세요</h1>
+              <p className="mt-3 max-w-2xl text-sm leading-6">문제를 준비하고 방을 만들면 참가자는 QR 코드로 입장할 수 있습니다.</p>
+              <div className="mt-6 flex flex-wrap gap-2">
+                <Button asChild className="bg-zinc-950 font-black text-white"><a href="/host/quizzes">퀴즈 관리로 이동</a></Button>
+                <Button asChild variant="outline" className="border-zinc-950 bg-white font-black"><a href="/host/rooms">진행 중인 방 보기</a></Button>
               </div>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  setSelectedId("");
-                  setDraft(structuredClone(sampleQuiz));
-                }}
-              >
-                <Plus aria-hidden />
-                새 세트
-              </Button>
+            </section>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <DashboardMetric label="저장된 문제 세트" value={quizzes.length} href="/host/quizzes" />
+              <DashboardMetric label="진행 중인 방" value={runningRooms.length} href="/host/rooms" />
+              <DashboardMetric label="완료된 결과" value={finishedRooms.length} href="/host/results" />
             </div>
-
-            <select
-              value={selectedId}
-              onChange={(event) => selectQuiz(event.target.value)}
-              className="mt-4 h-11 w-full rounded-md border border-zinc-300 bg-white px-3 font-bold"
-            >
-              <option value="">새 문제 세트</option>
-              {quizzes.map((quiz) => (
-                <option key={quiz.id ?? quiz.title} value={quiz.id ?? ""}>
-                  {quiz.title}
-                </option>
-              ))}
-            </select>
-
-            <label className="mt-4 block text-sm font-bold" htmlFor="quiz-title">
-              제목
-            </label>
-            <input
-              id="quiz-title"
-              value={draft.title}
-              onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
-              className="mt-2 h-11 w-full rounded-md border border-zinc-300 px-3 font-bold"
-            />
-            <label className="mt-4 block text-sm font-bold" htmlFor="quiz-desc">
-              설명
-            </label>
-            <textarea
-              id="quiz-desc"
-              value={draft.description ?? ""}
-              onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))}
-              rows={3}
-              className="mt-2 w-full rounded-md border border-zinc-300 px-3 py-2"
-            />
-            <div className="mt-4 flex gap-2">
-              <Button onClick={() => void saveDraft()} disabled={busy} className="flex-1 bg-zinc-950 font-black text-white">
-                <Save aria-hidden />
-                저장
-              </Button>
-              <Button onClick={() => void createRoom()} disabled={busy} className="flex-1 bg-[#ffcf4a] font-black text-zinc-950 hover:bg-[#f2bd2f]">
-                <MonitorPlay aria-hidden />
-                방 만들기
-              </Button>
+            <div className="grid gap-5 lg:grid-cols-2">
+              <section className="rounded-md border-2 border-zinc-950 bg-white p-5">
+                <div className="flex items-center justify-between gap-3">
+                  <h2 className="text-xl font-black">진행 중인 방</h2>
+                  <a href="/host/rooms" className="text-sm font-bold underline">모두 보기</a>
+                </div>
+                <RoomLinks rooms={runningRooms.slice(0, 4)} empty="진행 중인 방이 없습니다." />
+              </section>
+              <section className="rounded-md border-2 border-zinc-950 bg-white p-5">
+                <div className="flex items-center justify-between gap-3">
+                  <h2 className="text-xl font-black">문제 세트로 방 만들기</h2>
+                  <a href="/host/quizzes" className="text-sm font-bold underline">문제 편집</a>
+                </div>
+                <div className="mt-4 space-y-2">
+                  {quizzes.slice(0, 5).map((quiz) => (
+                    <div key={quiz.id} className="flex items-center justify-between gap-3 rounded-md border border-zinc-200 p-3">
+                      <div className="min-w-0"><p className="truncate font-black">{quiz.title}</p><p className="text-xs text-zinc-500">{quiz.questions.length}문제</p></div>
+                      <Button size="sm" disabled={busy} onClick={() => void createRoom(quiz.id)}>방 만들기</Button>
+                    </div>
+                  ))}
+                  {quizzes.length === 0 ? <p className="text-sm text-zinc-500">먼저 문제 세트를 만들어 주세요.</p> : null}
+                </div>
+              </section>
             </div>
-            <Button
-              variant="outline"
-              className="mt-2 w-full"
-              onClick={() => void deleteSelectedQuiz()}
-              disabled={busy}
-            >
-              <Trash2 aria-hidden />
-              문제 세트 삭제
-            </Button>
-            {notice ? <p className="mt-4 rounded-md bg-[#fff4d0] p-3 text-sm font-bold">{notice}</p> : null}
-          </section>
+          </div>
+        ) : null}
 
-          <RoomCard
-            activeCode={activeCode}
-            joinUrl={joinUrl}
-            qrUrl={qrUrl}
-            state={state}
-            onCopy={(text) => void navigator.clipboard?.writeText(text)}
-          />
-          <RoomHistory
-            rooms={rooms}
-            activeCode={activeCode}
-            busy={busy}
-            onOpen={(code) => {
-              setActiveCode(normalizeCode(code));
-              void refreshState(code);
-            }}
-            onDelete={(code) => void deleteActiveRoom(code)}
-          />
-          <PasswordCard
-            currentPassword={currentPassword}
-            nextPassword={nextPassword}
-            busy={busy}
-            onCurrentPassword={setCurrentPassword}
-            onNextPassword={setNextPassword}
-            onSubmit={changePassword}
-          />
-        </aside>
+        {view === "quizzes" ? (
+          <div>
+            <PageHeading title="퀴즈 관리" description="문제를 만들고 저장한 뒤 행사 방을 시작하세요." />
+            <div className="grid items-start gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
+              <section className="rounded-md border-2 border-zinc-950 bg-white p-4 shadow-[5px_5px_0_#18181b]">
+                <div className="flex items-center justify-between gap-3">
+                  <h2 className="text-xl font-black">문제 세트</h2>
+                  <Button size="sm" variant="outline" onClick={() => { setSelectedId(""); setDraft(structuredClone(sampleQuiz)); }}><Plus aria-hidden />새 세트</Button>
+                </div>
+                <select value={selectedId} onChange={(event) => selectQuiz(event.target.value)} className="mt-4 h-11 w-full rounded-md border border-zinc-300 bg-white px-3 font-bold">
+                  <option value="">새 문제 세트</option>
+                  {quizzes.map((quiz) => <option key={quiz.id ?? quiz.title} value={quiz.id ?? ""}>{quiz.title}</option>)}
+                </select>
+                <label className="mt-4 block text-sm font-bold" htmlFor="quiz-title">제목</label>
+                <input id="quiz-title" value={draft.title} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} className="mt-2 h-11 w-full rounded-md border border-zinc-300 px-3 font-bold" />
+                <label className="mt-4 block text-sm font-bold" htmlFor="quiz-desc">설명</label>
+                <textarea id="quiz-desc" value={draft.description ?? ""} onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))} rows={3} className="mt-2 w-full rounded-md border border-zinc-300 px-3 py-2" />
+                <div className="mt-4 flex gap-2">
+                  <Button onClick={() => void saveDraft()} disabled={busy} className="flex-1 bg-zinc-950 font-black text-white"><Save aria-hidden />저장</Button>
+                  <Button onClick={() => void createRoom()} disabled={busy || !draft.id} className="flex-1 bg-[#ffcf4a] font-black text-zinc-950 hover:bg-[#f2bd2f]"><MonitorPlay aria-hidden />방 만들기</Button>
+                </div>
+                {!draft.id ? <p className="mt-2 text-xs text-zinc-500">새 세트는 저장 후 방을 만들 수 있습니다.</p> : null}
+                <Button variant="outline" className="mt-3 w-full" onClick={() => void deleteSelectedQuiz()} disabled={busy || !draft.id}><Trash2 aria-hidden />문제 세트 삭제</Button>
+              </section>
+              <QuizEditor draft={draft} busy={busy} onDraft={setDraft} onQuestion={updateQuestion} onKind={changeKind} onUpload={uploadImages} />
+            </div>
+          </div>
+        ) : null}
 
-        <section className="grid gap-5 xl:grid-cols-[minmax(0,1.05fr)_minmax(340px,0.95fr)]">
-          <QuizEditor
-            draft={draft}
-            busy={busy}
-            onDraft={setDraft}
-            onQuestion={updateQuestion}
-            onKind={changeKind}
-            onUpload={uploadImages}
-          />
-          <LiveControl
-            code={activeCode}
-            state={state}
-            busy={busy}
-            onAction={roomAction}
-            onRefresh={() => refreshState()}
-          />
-        </section>
+        {view === "rooms" ? (
+          <div>
+            <PageHeading title={roomCode ? `진행 방 ${activeCode}` : "진행 중인 방"} description={roomCode ? "대기실과 문제 진행을 한곳에서 관리합니다." : "방을 선택해 참가 안내와 진행 콘솔을 엽니다."} />
+            {roomCode ? (
+              <div className="grid items-start gap-5 lg:grid-cols-[340px_minmax(0,1fr)]">
+                <RoomCard activeCode={activeCode} joinUrl={joinUrl} qrUrl={qrUrl} state={state} onCopy={(text) => void navigator.clipboard?.writeText(text)} />
+                <LiveControl code={activeCode} state={state} busy={busy} onAction={roomAction} onRefresh={() => refreshState()} />
+              </div>
+            ) : (
+              <section className="rounded-md border-2 border-zinc-950 bg-white p-5">
+                <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-xl font-black">열려 있는 방</h2><Button asChild variant="outline"><a href="/host/quizzes">새 방 만들기</a></Button></div>
+                <RoomLinks rooms={runningRooms} empty="진행 중인 방이 없습니다. 퀴즈 관리에서 새 방을 만들어 주세요." />
+              </section>
+            )}
+          </div>
+        ) : null}
+
+        {view === "results" ? (
+          <div>
+            <PageHeading title="결과" description="완료한 게임의 우승자와 순위를 확인하세요." />
+            <div className="grid items-start gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
+              <section className="rounded-md border-2 border-zinc-950 bg-white p-4">
+                <h2 className="text-xl font-black">완료된 진행 기록</h2>
+                <div className="mt-4 space-y-2">
+                  {finishedRooms.map((room) => (
+                    <div key={room.code} className="flex items-center gap-2 rounded-md border border-zinc-200 p-3">
+                      <a href={`/host/results/${normalizeCode(room.code)}`} aria-current={normalizeCode(room.code) === normalizeCode(roomCode) ? "page" : undefined} className="min-w-0 flex-1">
+                        <p className="font-black">{room.code}</p><p className="text-xs text-zinc-500">{room.createdAt ? new Date(room.createdAt).toLocaleString("ko-KR") : "완료"}</p>
+                      </a>
+                      <Button size="icon-sm" variant="outline" aria-label={`${room.code} 결과 삭제`} disabled={busy} onClick={() => void deleteActiveRoom(room.code)}><Trash2 aria-hidden /></Button>
+                    </div>
+                  ))}
+                  {finishedRooms.length === 0 ? <p className="text-sm text-zinc-500">완료된 게임이 없습니다.</p> : null}
+                </div>
+              </section>
+              <ResultDetail state={roomCode ? state : null} selected={Boolean(roomCode)} />
+            </div>
+          </div>
+        ) : null}
+
+        {view === "settings" ? (
+          <div>
+            <PageHeading title="설정" description="진행자 계정의 비밀번호를 관리합니다." />
+            <div className="max-w-xl">
+              <PasswordCard currentPassword={currentPassword} nextPassword={nextPassword} busy={busy} onCurrentPassword={setCurrentPassword} onNextPassword={setNextPassword} onSubmit={changePassword} />
+            </div>
+          </div>
+        ) : null}
       </div>
     </main>
   );
@@ -729,53 +750,80 @@ function RoomCard({
   );
 }
 
-function RoomHistory({
-  rooms,
-  activeCode,
-  busy,
-  onOpen,
-  onDelete,
-}: {
-  rooms: Array<{ code: string; phase?: string; createdAt?: string }>;
-  activeCode: string;
-  busy: boolean;
-  onOpen: (code: string) => void;
-  onDelete: (code: string) => void;
-}) {
+function PageHeading({ title, description }: { title: string; description: string }) {
   return (
-    <section className="rounded-md border-2 border-zinc-950 bg-white p-4">
-      <h2 className="text-xl font-black">진행 기록</h2>
-      <p className="mt-1 text-sm text-zinc-600">완료된 방의 결과를 다시 열어볼 수 있습니다.</p>
-      <div className="mt-4 space-y-2">
-        {rooms.map((room) => (
-          <div key={room.code} className="flex items-center justify-between gap-2 rounded-md border border-zinc-200 p-3">
-            <button
-              type="button"
-              onClick={() => onOpen(room.code)}
-              className="min-w-0 flex-1 text-left"
-            >
-              <p className="truncate font-black">
-                {room.code}
-                {normalizeCode(room.code) === normalizeCode(activeCode) ? (
-                  <span className="ml-2 text-xs text-[#d08b00]">열림</span>
-                ) : null}
-              </p>
-              <p className="text-xs text-zinc-500">
-                {phaseLabel(room.phase)} {room.createdAt ? `· ${new Date(room.createdAt).toLocaleString("ko-KR")}` : ""}
-              </p>
-            </button>
-            <Button
-              size="icon-sm"
-              variant="outline"
-              aria-label="진행 기록 삭제"
-              disabled={busy}
-              onClick={() => onDelete(room.code)}
-            >
-              <Trash2 aria-hidden />
-            </Button>
+    <div className="mb-6">
+      <h1 className="text-3xl font-black">{title}</h1>
+      <p className="mt-2 text-sm text-zinc-600">{description}</p>
+    </div>
+  );
+}
+
+function DashboardMetric({ label, value, href }: { label: string; value: number; href: string }) {
+  return (
+    <a href={href} className="rounded-md border-2 border-zinc-950 bg-white p-5 shadow-[5px_5px_0_#18181b] hover:bg-[#fff9e8]">
+      <p className="text-sm font-bold text-zinc-600">{label}</p>
+      <p className="mt-2 text-3xl font-black">{value}</p>
+    </a>
+  );
+}
+
+function RoomLinks({ rooms, empty }: { rooms: Array<{ code: string; phase?: string; createdAt?: string }>; empty: string }) {
+  return (
+    <div className="mt-4 space-y-2">
+      {rooms.map((room) => (
+        <a key={room.code} href={`/host/rooms/${normalizeCode(room.code)}`} className="flex items-center justify-between gap-3 rounded-md border border-zinc-200 p-3 hover:bg-[#fff9e8]">
+          <div>
+            <p className="font-black">{room.code}</p>
+            <p className="text-xs text-zinc-500">{room.createdAt ? new Date(room.createdAt).toLocaleString("ko-KR") : "진행 중"}</p>
+          </div>
+          <span className="rounded-md bg-[#ffcf4a] px-2 py-1 text-xs font-black">{phaseLabel(room.phase)}</span>
+        </a>
+      ))}
+      {rooms.length === 0 ? <p className="text-sm text-zinc-500">{empty}</p> : null}
+    </div>
+  );
+}
+
+function ResultDetail({ state, selected }: { state: RoomState | null; selected: boolean }) {
+  if (!selected || !state) {
+    return (
+      <section className="rounded-md border-2 border-zinc-950 bg-white p-6">
+        <h2 className="text-xl font-black">상세 결과</h2>
+        <p className="mt-3 text-sm text-zinc-500">{selected ? "결과를 불러오는 중입니다." : "왼쪽에서 완료된 기록을 선택하세요."}</p>
+      </section>
+    );
+  }
+
+  const ranking = state.ranking ?? [];
+  const participants = state.participants ?? [];
+  return (
+    <section className="rounded-md border-2 border-zinc-950 bg-white p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-bold text-zinc-500">방 {state.code}</p>
+          <h2 className="mt-1 text-2xl font-black">{state.quiz?.title ?? "골든벨 결과"}</h2>
+        </div>
+        <Button asChild variant="outline"><a href={`/display/${state.code}`} target="_blank" rel="noopener noreferrer"><MonitorPlay aria-hidden />발표 화면</a></Button>
+      </div>
+      <div className="mt-5 grid gap-3 sm:grid-cols-3">
+        <Metric label="참가자" value={participants.length} />
+        <Metric label="문제" value={state.quiz?.questions.length ?? 0} />
+        <Metric label="상태" value={phaseLabel(state.phase)} />
+      </div>
+      <div className="mt-5 rounded-md bg-[#ffcf4a] p-5">
+        <p className="text-sm font-black">최종 우승자</p>
+        <p className="mt-2 text-2xl font-black">{state.winner?.nickname ?? "우승자 없음"}</p>
+      </div>
+      <h3 className="mt-6 text-lg font-black">최종 순위</h3>
+      <div className="mt-3 space-y-2">
+        {ranking.map((row, index) => (
+          <div key={row.id} className="flex items-center justify-between gap-3 rounded-md border border-zinc-200 p-3">
+            <span className="font-black">{row.rank ?? index + 1}위 · {row.nickname}</span>
+            <span className="text-sm font-bold text-zinc-600">{row.correctCount ?? row.score ?? 0}점</span>
           </div>
         ))}
-        {rooms.length === 0 ? <p className="text-sm text-zinc-500">저장된 진행 기록이 없습니다.</p> : null}
+        {ranking.length === 0 ? <p className="text-sm text-zinc-500">표시할 순위가 없습니다.</p> : null}
       </div>
     </section>
   );
@@ -1113,7 +1161,7 @@ function LiveControl({
         </div>
 
         <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
-          <Button disabled={!code || busy || phase !== "lobby"} onClick={() => void onAction(() => quizApi.startRoom(code), "게임을 시작했습니다.")}>
+          <Button disabled={!code || !state || busy || phase !== "lobby"} onClick={() => void onAction(() => quizApi.startRoom(code), "게임을 시작했습니다.")}>
             시작
           </Button>
           <Button disabled={!code || busy || phase !== "question"} variant="outline" onClick={() => void onAction(() => quizApi.closeQuestion(code), "제출을 마감했습니다.")}>
