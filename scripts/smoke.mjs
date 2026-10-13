@@ -20,8 +20,9 @@ async function request(path, method = "GET", body, token) {
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  const setCookie = response.headers.get("set-cookie");
-  if (setCookie) cookie = setCookie.split(";")[0];
+  const sessionCookie = response.headers.getSetCookie?.().find((value) => value.startsWith("golden_session="))
+    ?? response.headers.get("set-cookie")?.match(/golden_session=[^;]+/)?.[0];
+  if (sessionCookie) cookie = sessionCookie.split(";")[0];
   const data = await response.json().catch(() => null);
   return { status: response.status, data };
 }
