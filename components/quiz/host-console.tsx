@@ -1,10 +1,11 @@
 "use client";
 
-import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ChevronDown,
+  ChevronUp,
   Check,
   Copy,
-  Eye,
   ImagePlus,
   LogOut,
   MonitorPlay,
@@ -120,6 +121,24 @@ function validateRuntimeQuestion(question: QuizQuestion): string {
   return "";
 }
 
+function validateQuizDraft(quiz: QuizSet): { index: number; message: string } | null {
+  if (!quiz.title.trim()) return { index: -1, message: "제목을 입력하세요." };
+  if (quiz.questions.length === 0) return { index: -1, message: "문제를 1개 이상 추가하세요." };
+  for (let index = 0; index < quiz.questions.length; index += 1) {
+    const question = quiz.questions[index];
+    if (!question.prompt.trim()) return { index, message: "문제를 입력하세요." };
+    if (!question.correctAnswers.some((answer) => answer.trim())) return { index, message: "정답을 입력하세요." };
+    if (question.kind === "multiple") {
+      const options = (question.options ?? []).map((option) => option.trim()).filter(Boolean);
+      if (options.length < 2 || options.length > 8) return { index, message: "보기는 2~8개 필요합니다." };
+      if (!question.correctAnswers.every((answer) => options.includes(answer.trim()))) {
+        return { index, message: "정답은 보기 중에서 선택하세요." };
+      }
+    }
+  }
+  return null;
+}
+
 async function compressImage(file: File): Promise<File> {
   if (!file.type.startsWith("image/") || file.size <= 1_000_000) {
     return file;
@@ -170,9 +189,18 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
   const [loggedIn, setLoggedIn] = useState(false);
   const [checking, setChecking] = useState(true);
   const [quizzes, setQuizzes] = useState<QuizSet[]>([]);
-  const [rooms, setRooms] = useState<Array<{ code: string; phase?: string; createdAt?: string }>>([]);
+  const [rooms, setRooms] = useState<Array<{ code: string; phase?: string; createdAt?: string; quizTitle?: string }>>([]);
   const [selectedId, setSelectedId] = useState<string>("");
   const [draft, setDraft] = useState<QuizSet>(sampleQuiz);
+  const [savedSnapshot, setSavedSnapshot] = useState(() => JSON.stringify(cleanQuiz(sampleQuiz)));
+  const [validationAttempt, setValidationAttempt] = useState(0);
+  const [expandedQuestionIndex, setExpandedQuestionIndex] = useState<number | null>(0);
+  const [deleteTarget, setDeleteTarget] = useState<{ type: "quiz" | "room"; id: string; label: string } | null>(null);
+  const [deletedQuizzes, setDeletedQuizzes] = useState<QuizSet[]>([]);
+  const [deletedRooms, setDeletedRooms] = useState<Array<{ code: string; quizTitle?: string }>>([]);
+  const allowNavigation = useRef(false);
+  const cancelDeleteButton = useRef<HTMLButtonElement>(null);
+  const confirmDeleteButton = useRef<HTMLButtonElement>(null);
   const [activeCode, setActiveCode] = useState(() => normalizeCode(roomCode));
   const [state, setState] = useState<RoomState | null>(null);
   const [notice, setNotice] = useState("");
@@ -180,6 +208,37 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
   const [currentPassword, setCurrentPassword] = useState("");
   const [nextPassword, setNextPassword] = useState("");
   const [origin, setOrigin] = useState("");
+  const dirty = view === "quizzes" && JSON.stringify(cleanQuiz(draft)) !== savedSnapshot;
+
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => {
+      if (allowNavigation.current) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+
+  useEffect(() => {
+    if (!deleteTarget) return;
+    cancelDeleteButton.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDeleteTarget(null);
+      if (event.key === "Tab") {
+        if (event.shiftKey && document.activeElement === cancelDeleteButton.current) {
+          event.preventDefault();
+          confirmDeleteButton.current?.focus();
+        } else if (!event.shiftKey && document.activeElement === confirmDeleteButton.current) {
+          event.preventDefault();
+          cancelDeleteButton.current?.focus();
+        }
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [deleteTarget]);
 
   useEffect(() => {
     const id = window.setTimeout(() => setOrigin(window.location.origin), 0);
@@ -203,7 +262,7 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
       .getHost()
       .then(() => {
         setLoggedIn(true);
-        return Promise.all([loadQuizzes(), loadRooms()]);
+        return Promise.all([loadQuizzes(), loadRooms(), loadDeletedItems()]);
       })
       .catch(() => undefined)
       .finally(() => setChecking(false));
@@ -238,15 +297,23 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
     if (selected) {
       setSelectedId(selected.id ?? "");
       setDraft(structuredClone(selected));
+      setSavedSnapshot(JSON.stringify(cleanQuiz(selected)));
     } else {
       setSelectedId("");
       setDraft(structuredClone(sampleQuiz));
+      setSavedSnapshot(JSON.stringify(cleanQuiz(sampleQuiz)));
     }
   }
 
   async function loadRooms() {
     const result = await quizApi.listRooms();
     setRooms(result.rooms ?? []);
+  }
+
+  async function loadDeletedItems() {
+    const [quizResult, roomResult] = await Promise.all([quizApi.listDeletedQuizzes(), quizApi.listDeletedRooms()]);
+    setDeletedQuizzes(quizResult.quizzes ?? []);
+    setDeletedRooms(roomResult.rooms ?? []);
   }
 
   const refreshState = useCallback(async (code = activeCode, quiet = false) => {
@@ -295,11 +362,23 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
     if (result) {
       setPassword("");
       setLoggedIn(true);
-      await Promise.all([loadQuizzes(), loadRooms()]);
+      await Promise.all([loadQuizzes(), loadRooms(), loadDeletedItems()]);
     }
   }
 
   async function saveDraft() {
+    setValidationAttempt((current) => current + 1);
+    const validation = validateQuizDraft(draft);
+    if (validation) {
+      setNotice(validation.index < 0 ? validation.message : `문제 ${validation.index + 1}: ${validation.message}`);
+      if (validation.index >= 0) {
+        setExpandedQuestionIndex(validation.index);
+        window.setTimeout(() => document.getElementById(`quiz-question-${validation.index}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+      } else if (!draft.title.trim()) {
+        document.getElementById("quiz-title")?.focus();
+      }
+      return null;
+    }
     const cleaned = cleanQuiz(draft);
     const result = await run(
       () => (cleaned.id ? quizApi.updateQuiz(cleaned.id, cleaned) : quizApi.saveQuiz(cleaned)),
@@ -310,15 +389,18 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
       const saved = unwrapQuiz(result);
       setDraft(saved);
       setSelectedId(saved.id ?? "");
-      await loadQuizzes(saved.id);
+      setSavedSnapshot(JSON.stringify(cleanQuiz(saved)));
+      setQuizzes((current) => [saved, ...current.filter((item) => item.id !== saved.id)]);
+      return saved;
     }
+    return null;
   }
 
   async function createRoom(quizId?: string) {
-    const id = quizId ?? draft.id;
+    const saved = !quizId && (dirty || !draft.id) ? await saveDraft() : null;
+    const id = quizId ?? saved?.id ?? (dirty || !draft.id ? undefined : draft.id);
 
     if (!id) {
-      setNotice("방을 만들기 전에 문제 세트를 먼저 저장하세요.");
       return;
     }
 
@@ -326,6 +408,7 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
     const code = result?.room?.code ?? result?.code;
 
     if (code) {
+      allowNavigation.current = true;
       window.location.assign(`/host/rooms/${normalizeCode(code)}`);
     }
   }
@@ -341,29 +424,27 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
   }
 
   function selectQuiz(id: string) {
+    if (id === selectedId) return;
+    if (dirty && !window.confirm("저장되지 않은 변경사항이 있습니다. 저장하지 않고 다른 문제 세트로 이동할까요?")) return;
     const quiz = quizzes.find((item) => item.id === id);
     setSelectedId(id);
 
     if (quiz) {
       setDraft(structuredClone(quiz));
+      setSavedSnapshot(JSON.stringify(cleanQuiz(quiz)));
     } else {
       setDraft(structuredClone(sampleQuiz));
+      setSavedSnapshot(JSON.stringify(cleanQuiz(sampleQuiz)));
     }
+    setExpandedQuestionIndex(0);
   }
 
-  async function deleteSelectedQuiz() {
-    if (!draft.id) {
-      setSelectedId("");
-      setDraft(structuredClone(sampleQuiz));
-      return;
-    }
-
-    const result = await run(() => quizApi.deleteQuiz(draft.id!), "문제 세트를 삭제했습니다.");
+  async function deleteSelectedQuiz(id: string) {
+    const result = await run(() => quizApi.deleteQuiz(id), "문제 세트를 삭제했습니다. 최근 삭제됨에서 복구할 수 있습니다.");
 
     if (result) {
-      setSelectedId("");
-      setDraft(structuredClone(sampleQuiz));
       await loadQuizzes();
+      await loadDeletedItems();
     }
   }
 
@@ -374,7 +455,7 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
       return;
     }
 
-    const result = await run(() => quizApi.deleteRoom(normalized), "진행 기록을 삭제했습니다.");
+    const result = await run(() => quizApi.deleteRoom(normalized), "진행 기록을 삭제했습니다. 최근 삭제됨에서 복구할 수 있습니다.");
 
     if (result) {
       setRooms((current) => current.filter((room) => normalizeCode(room.code) !== normalized));
@@ -383,10 +464,33 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
         setActiveCode("");
         setState(null);
       }
+      await loadDeletedItems();
       if (view === "results" && normalizeCode(roomCode) === normalized) {
         window.location.assign("/host/results");
       }
     }
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget) return;
+    const target = deleteTarget;
+    setDeleteTarget(null);
+    if (target.type === "quiz") await deleteSelectedQuiz(target.id);
+    else await deleteActiveRoom(target.id);
+  }
+
+  async function restoreDeletedQuiz(id: string) {
+    const restored = await run(() => quizApi.restoreQuiz(id), "문제 세트를 복구했습니다.");
+    if (restored) {
+      const result = await quizApi.listQuizzes();
+      setQuizzes(normalizeQuizList(result));
+      await loadDeletedItems();
+    }
+  }
+
+  async function restoreDeletedRoom(code: string) {
+    const restored = await run(() => quizApi.restoreRoom(code), "진행 결과를 복구했습니다.");
+    if (restored) await Promise.all([loadRooms(), loadDeletedItems()]);
   }
 
   async function changePassword(event: FormEvent<HTMLFormElement>) {
@@ -522,7 +626,10 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
           </a>
           <Button
             variant="outline"
-            onClick={() => void quizApi.hostLogout().finally(() => setLoggedIn(false))}
+            onClick={() => {
+              if (dirty && !window.confirm("저장되지 않은 변경사항이 있습니다. 저장하지 않고 로그아웃할까요?")) return;
+              void quizApi.hostLogout().finally(() => setLoggedIn(false));
+            }}
           >
             <LogOut aria-hidden />
             로그아웃
@@ -597,7 +704,7 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
               <section className="rounded-md border-2 border-zinc-950 bg-white p-4 shadow-[5px_5px_0_#18181b]">
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="text-xl font-black">문제 세트</h2>
-                  <Button size="sm" variant="outline" onClick={() => { setSelectedId(""); setDraft(structuredClone(sampleQuiz)); }}><Plus aria-hidden />새 세트</Button>
+                  <Button size="sm" variant="outline" onClick={() => selectQuiz("")}><Plus aria-hidden />새 세트</Button>
                 </div>
                 <select value={selectedId} onChange={(event) => selectQuiz(event.target.value)} className="mt-4 h-11 w-full rounded-md border border-zinc-300 bg-white px-3 font-bold">
                   <option value="">새 문제 세트</option>
@@ -607,14 +714,28 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
                 <input id="quiz-title" value={draft.title} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} className="mt-2 h-11 w-full rounded-md border border-zinc-300 px-3 font-bold" />
                 <label className="mt-4 block text-sm font-bold" htmlFor="quiz-desc">설명</label>
                 <textarea id="quiz-desc" value={draft.description ?? ""} onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))} rows={3} className="mt-2 w-full rounded-md border border-zinc-300 px-3 py-2" />
+                <p role="status" className={`mt-3 rounded-md px-3 py-2 text-sm font-bold ${dirty || !draft.id ? "bg-[#fff4d0] text-[#8a6100]" : "bg-emerald-50 text-emerald-800"}`}>
+                  {!draft.id ? "● 새 문제 세트 · 아직 저장 전" : dirty ? "● 저장되지 않은 변경사항" : "✓ 모든 변경사항 저장됨"}
+                </p>
                 <div className="mt-4 flex gap-2">
                   <Button onClick={() => void saveDraft()} disabled={busy} className="flex-1 bg-zinc-950 font-black text-white"><Save aria-hidden />저장</Button>
-                  <Button onClick={() => void createRoom()} disabled={busy || !draft.id} className="flex-1 bg-[#ffcf4a] font-black text-zinc-950 hover:bg-[#f2bd2f]"><MonitorPlay aria-hidden />방 만들기</Button>
+                  <Button onClick={() => void createRoom()} disabled={busy} className="flex-1 bg-[#ffcf4a] font-black text-zinc-950 hover:bg-[#f2bd2f]"><MonitorPlay aria-hidden />저장하고 방 만들기</Button>
                 </div>
-                {!draft.id ? <p className="mt-2 text-xs text-zinc-500">새 세트는 저장 후 방을 만들 수 있습니다.</p> : null}
-                <Button variant="outline" className="mt-3 w-full" onClick={() => void deleteSelectedQuiz()} disabled={busy || !draft.id}><Trash2 aria-hidden />문제 세트 삭제</Button>
+                <Button variant="outline" className="mt-3 w-full" onClick={() => setDeleteTarget({ type: "quiz", id: draft.id!, label: quizzes.find((quiz) => quiz.id === draft.id)?.title ?? draft.title })} disabled={busy || !draft.id}><Trash2 aria-hidden />문제 세트 삭제</Button>
               </section>
-              <QuizEditor draft={draft} busy={busy} onDraft={setDraft} onQuestion={updateQuestion} onKind={changeKind} onUpload={uploadImages} />
+              <QuizEditor draft={draft} busy={busy} validationAttempt={validationAttempt} expandedIndex={expandedQuestionIndex} onExpanded={setExpandedQuestionIndex} onDraft={setDraft} onQuestion={updateQuestion} onKind={changeKind} onUpload={uploadImages} />
+            </div>
+            {deletedQuizzes.length ? (
+              <details className="mt-5 rounded-md border border-zinc-300 bg-white p-4">
+                <summary className="cursor-pointer font-black">최근 삭제된 문제 세트 ({deletedQuizzes.length})</summary>
+                <ul className="mt-3 space-y-2">
+                  {deletedQuizzes.map((quiz) => <li key={quiz.id} className="flex items-center justify-between gap-3 rounded-md bg-[#f7f2e8] p-3"><span className="min-w-0 truncate font-bold">{quiz.title}</span><Button size="sm" variant="outline" disabled={busy} onClick={() => void restoreDeletedQuiz(quiz.id!)}>복구</Button></li>)}
+                </ul>
+              </details>
+            ) : null}
+            <div className="sticky bottom-0 z-20 mt-5 flex items-center justify-between gap-3 rounded-md border-2 border-zinc-950 bg-white/95 p-3 shadow-[0_-4px_20px_#0002] backdrop-blur">
+              <span className="text-sm font-bold">{!draft.id ? "새 문제 세트 · 저장 전" : dirty ? "저장되지 않은 변경사항" : "저장 완료"}</span>
+              <Button onClick={() => void saveDraft()} disabled={busy || (!dirty && !!draft.id)} className="bg-zinc-950 font-black text-white"><Save aria-hidden />변경사항 저장</Button>
             </div>
           </div>
         ) : null}
@@ -631,9 +752,12 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
                 <ResultDetail state={state} selected />
               </div>
             ) : roomCode ? (
-              <div className="grid items-start gap-5 lg:grid-cols-[340px_minmax(0,1fr)]">
-                <RoomCard activeCode={activeCode} joinUrl={joinUrl} qrUrl={qrUrl} state={state} onCopy={(text) => void navigator.clipboard?.writeText(text)} />
-                <LiveControl code={activeCode} state={state} busy={busy} onAction={roomAction} onRefresh={() => refreshState()} />
+              <div>
+                <RoomActionBar code={activeCode} state={state} busy={busy} onAction={roomAction} />
+                <div className="mt-5 grid items-start gap-5 lg:grid-cols-[340px_minmax(0,1fr)]">
+                  <RoomCard key={!state || state.phase === "lobby" ? "lobby" : "started"} activeCode={activeCode} joinUrl={joinUrl} qrUrl={qrUrl} state={state} onCopy={(text) => void navigator.clipboard?.writeText(text)} />
+                  <LiveControl code={activeCode} state={state} busy={busy} onAction={roomAction} onRefresh={() => refreshState()} />
+                </div>
               </div>
             ) : (
               <section className="rounded-md border-2 border-zinc-950 bg-white p-5">
@@ -656,7 +780,7 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
                       <a href={`/host/results/${normalizeCode(room.code)}`} aria-current={normalizeCode(room.code) === normalizeCode(roomCode) ? "page" : undefined} className="min-w-0 flex-1">
                         <p className="font-black">{room.code}</p><p className="text-xs text-zinc-500">{room.createdAt ? new Date(room.createdAt).toLocaleString("ko-KR") : "완료"}</p>
                       </a>
-                      <Button size="icon-sm" variant="outline" aria-label={`${room.code} 결과 삭제`} disabled={busy} onClick={() => void deleteActiveRoom(room.code)}><Trash2 aria-hidden /></Button>
+                      <Button size="icon-sm" variant="outline" aria-label={`${room.code} 결과 삭제`} disabled={busy} onClick={() => setDeleteTarget({ type: "room", id: room.code, label: room.quizTitle || room.code })}><Trash2 aria-hidden /></Button>
                     </div>
                   ))}
                   {finishedRooms.length === 0 ? <p className="text-sm text-zinc-500">완료된 게임이 없습니다.</p> : null}
@@ -664,6 +788,14 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
               </section>
               <ResultDetail state={roomCode ? state : null} selected={Boolean(roomCode)} />
             </div>
+            {deletedRooms.length ? (
+              <details className="mt-5 rounded-md border border-zinc-300 bg-white p-4">
+                <summary className="cursor-pointer font-black">최근 삭제된 진행 결과 ({deletedRooms.length})</summary>
+                <ul className="mt-3 space-y-2">
+                  {deletedRooms.map((room) => <li key={room.code} className="flex items-center justify-between gap-3 rounded-md bg-[#f7f2e8] p-3"><span className="min-w-0 truncate font-bold">{room.quizTitle || "진행 결과"} · {room.code}</span><Button size="sm" variant="outline" disabled={busy} onClick={() => void restoreDeletedRoom(room.code)}>복구</Button></li>)}
+                </ul>
+              </details>
+            ) : null}
           </div>
         ) : null}
 
@@ -676,6 +808,18 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
           </div>
         ) : null}
       </div>
+      {deleteTarget ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-zinc-950/60 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDeleteTarget(null); }}>
+          <section role="alertdialog" aria-modal="true" aria-labelledby="delete-heading" aria-describedby="delete-description" className="w-full max-w-md rounded-md border-2 border-zinc-950 bg-white p-6 shadow-[8px_8px_0_#ffcf4a]">
+            <h2 id="delete-heading" className="text-xl font-black">{deleteTarget.type === "quiz" ? "문제 세트를 삭제할까요?" : "진행 결과를 삭제할까요?"}</h2>
+            <p id="delete-description" className="mt-3 break-words text-sm leading-6">대상: <strong>{deleteTarget.label}</strong>{deleteTarget.type === "room" && deleteTarget.label !== deleteTarget.id ? ` · 방 코드 ${deleteTarget.id}` : ""}<br />삭제 후 최근 삭제됨에서 복구할 수 있습니다.{deleteTarget.type === "quiz" && dirty ? " 저장하지 않은 수정 내용은 사라집니다." : ""}</p>
+            <div className="mt-6 flex justify-end gap-2">
+              <Button ref={cancelDeleteButton} variant="outline" onClick={() => setDeleteTarget(null)}>취소</Button>
+              <Button ref={confirmDeleteButton} className="bg-[#b42318] font-black text-white hover:bg-[#901c14]" disabled={busy} onClick={() => void confirmDelete()}>삭제</Button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }
@@ -688,6 +832,45 @@ function ShellCenter({ title, body }: { title: string; body: string }) {
         <p className="mt-2 text-zinc-600">{body}</p>
       </div>
     </main>
+  );
+}
+
+function RoomActionBar({ code, state, busy, onAction }: {
+  code: string;
+  state: RoomState | null;
+  busy: boolean;
+  onAction: (action: () => Promise<RoomState>, success: string) => Promise<void>;
+}) {
+  const phase = state?.phase ?? "lobby";
+  const eligible = (state?.participants ?? []).filter((participant) => !participant.eliminated);
+  const submitted = new Set((state?.answers ?? []).map((answer) => answer.participantId));
+  const submittedCount = eligible.filter((participant) => submitted.has(participant.id)).length;
+  const action = phase === "lobby"
+    ? { label: "게임 시작", success: "게임을 시작했습니다.", run: () => quizApi.startRoom(code) }
+    : phase === "question"
+      ? { label: "제출 마감", success: "제출을 마감했습니다.", run: () => quizApi.closeQuestion(code) }
+      : phase === "closed"
+        ? { label: "정답 공개", success: "정답을 공개했습니다.", run: () => quizApi.revealQuestion(code) }
+        : phase === "revealed"
+          ? { label: "다음 단계", success: "다음 단계로 이동했습니다.", run: () => quizApi.nextQuestion(code) }
+          : null;
+
+  return (
+    <section className="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 rounded-md border-2 border-zinc-950 bg-[#ffcf4a]/95 p-3 shadow-[0_5px_15px_#0002] backdrop-blur sm:p-4" aria-label="현재 진행 단계">
+      <div>
+        <p className="text-xs font-black">현재 단계 · {phaseLabel(phase)} · 문제 {questionNumberLabel(state?.currentQuestionIndex)}</p>
+        <p className="mt-1 text-lg font-black">{phase === "lobby" ? `참가자 ${eligible.length}명 대기 중` : `제출 ${submittedCount}/${eligible.length}명`}</p>
+      </div>
+      {action ? (
+        <Button
+          className="min-w-36 bg-zinc-950 font-black text-white hover:bg-zinc-800"
+          disabled={!state || !code || busy}
+          onClick={() => void onAction(action.run, action.success)}
+        >
+          {action.label}
+        </Button>
+      ) : null}
+    </section>
   );
 }
 
@@ -705,20 +888,22 @@ function RoomCard({
   onCopy: (text: string) => void;
 }) {
   const participants = state?.participants ?? [];
+  const [qrExpanded, setQrExpanded] = useState(!state || state.phase === "lobby");
 
   return (
     <section className="rounded-md border-2 border-zinc-950 bg-white p-4">
       <h2 className="text-xl font-black">참가 안내</h2>
-      <div className="mt-4 grid place-items-center rounded-md border border-zinc-200 bg-[#f7f2e8] p-4">
-        {qrUrl ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={qrUrl} alt="참가 링크 QR 코드" className="h-44 w-44 rounded-md bg-white" />
-        ) : (
-          <div className="grid h-44 w-44 place-items-center rounded-md bg-white text-center text-sm font-bold text-zinc-500">
-            방을 만들면 QR이 표시됩니다.
-          </div>
-        )}
-      </div>
+      <details className="mt-3" open={qrExpanded} onToggle={(event) => setQrExpanded(event.currentTarget.open)}>
+        <summary className="cursor-pointer rounded-md bg-[#f7f2e8] px-3 py-2 font-bold">참가 QR 코드 {state?.phase === "lobby" ? "" : "보기"}</summary>
+        <div className="mt-2 grid place-items-center rounded-md border border-zinc-200 bg-[#f7f2e8] p-4">
+          {qrUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={qrUrl} alt="참가 링크 QR 코드" className="h-44 w-44 rounded-md bg-white" />
+          ) : (
+            <div className="grid h-44 w-44 place-items-center rounded-md bg-white text-center text-sm font-bold text-zinc-500">방을 만들면 QR이 표시됩니다.</div>
+          )}
+        </div>
+      </details>
       <div className="mt-4 rounded-md bg-zinc-950 p-4 text-center text-white">
         <p className="text-xs font-bold text-zinc-300">참가 코드</p>
         <p className="text-5xl font-black tracking-normal">{activeCode || "----"}</p>
@@ -894,6 +1079,9 @@ function Metric({ label, value }: { label: string; value: string | number }) {
 function QuizEditor({
   draft,
   busy,
+  validationAttempt,
+  expandedIndex,
+  onExpanded,
   onDraft,
   onQuestion,
   onKind,
@@ -901,11 +1089,22 @@ function QuizEditor({
 }: {
   draft: QuizSet;
   busy: boolean;
+  validationAttempt: number;
+  expandedIndex: number | null;
+  onExpanded: (index: number | null) => void;
   onDraft: (quiz: QuizSet) => void;
   onQuestion: (index: number, patch: Partial<QuizQuestion>) => void;
   onKind: (index: number, kind: QuizQuestion["kind"]) => void;
   onUpload: (index: number, event: ChangeEvent<HTMLInputElement>) => void;
 }) {
+  function moveQuestion(from: number, to: number) {
+    if (to < 0 || to >= draft.questions.length) return;
+    const questions = [...draft.questions];
+    [questions[from], questions[to]] = [questions[to], questions[from]];
+    onDraft({ ...draft, questions });
+    onExpanded(to);
+  }
+
   return (
     <section className="rounded-md border-2 border-zinc-950 bg-white p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -915,25 +1114,42 @@ function QuizEditor({
         </div>
         <Button
           variant="outline"
-          onClick={() =>
+          onClick={() => {
             onDraft({
               ...draft,
               questions: [...draft.questions, createBlankQuestion("multiple")],
-            })
-          }
+            });
+            onExpanded(draft.questions.length);
+          }}
         >
           <Plus aria-hidden />
           문제 추가
         </Button>
       </div>
 
-      <div className="mt-4 space-y-4">
+      <nav aria-label="문제 목록" className="mt-4 flex flex-wrap gap-2">
         {draft.questions.map((question, index) => (
-          <article key={question.id ?? index} className="rounded-md border border-zinc-200 bg-[#fbfaf7] p-4">
+          <button key={question.id ?? index} type="button" onClick={() => { onExpanded(index); document.getElementById(`quiz-question-${index}`)?.scrollIntoView({ behavior: "smooth", block: "start" }); }} className={`rounded-md border px-3 py-2 text-sm font-bold ${expandedIndex === index ? "border-zinc-950 bg-zinc-950 text-white" : "border-zinc-300 bg-white"}`}>
+            {index + 1}. {question.prompt.trim().slice(0, 14) || "새 문제"}
+          </button>
+        ))}
+      </nav>
+
+      <div className="mt-4 space-y-4">
+        {draft.questions.map((question, index) => {
+          const validation = validationAttempt ? validateQuizDraft({ ...draft, title: draft.title || "문제", questions: [question] }) : null;
+          const error = validation?.index === 0 ? validation.message : "";
+          return (
+          <article id={`quiz-question-${index}`} key={question.id ?? index} className={`scroll-mt-24 rounded-md border bg-[#fbfaf7] p-4 ${error ? "border-[#b42318]" : "border-zinc-200"}`}>
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <h3 className="font-black">문제 {index + 1}</h3>
+              <button type="button" className="flex min-w-0 items-center gap-2 text-left font-black" aria-expanded={expandedIndex === index} onClick={() => onExpanded(expandedIndex === index ? null : index)}>
+                {expandedIndex === index ? <ChevronUp aria-hidden className="size-4 shrink-0" /> : <ChevronDown aria-hidden className="size-4 shrink-0" />}
+                <span className="truncate">문제 {index + 1} · {question.prompt.trim().slice(0, 36) || "내용 없음"}</span>
+              </button>
               <div className="flex flex-wrap gap-2">
-                {(["ox", "multiple", "short"] as const).map((kind) => (
+                <Button size="icon-sm" variant="outline" aria-label={`문제 ${index + 1} 위로 이동`} disabled={index === 0} onClick={() => moveQuestion(index, index - 1)}><ChevronUp aria-hidden /></Button>
+                <Button size="icon-sm" variant="outline" aria-label={`문제 ${index + 1} 아래로 이동`} disabled={index === draft.questions.length - 1} onClick={() => moveQuestion(index, index + 1)}><ChevronDown aria-hidden /></Button>
+                {expandedIndex === index ? (["ox", "multiple", "short"] as const).map((kind) => (
                   <Button
                     key={kind}
                     size="sm"
@@ -943,22 +1159,26 @@ function QuizEditor({
                   >
                     {kind === "ox" ? "O/X" : kind === "multiple" ? "객관식" : "주관식"}
                   </Button>
-                ))}
+                )) : null}
                 <Button
                   size="icon-sm"
                   variant="outline"
                   aria-label="문제 삭제"
-                  onClick={() =>
+                  onClick={() => {
                     onDraft({
                       ...draft,
                       questions: draft.questions.filter((_, questionIndex) => questionIndex !== index),
-                    })
-                  }
+                    });
+                    onExpanded(expandedIndex === null ? null : Math.max(0, Math.min(expandedIndex, draft.questions.length - 2)));
+                  }}
                 >
                   <Trash2 aria-hidden />
                 </Button>
               </div>
             </div>
+
+            {error ? <p role="alert" className="mt-2 text-sm font-bold text-[#b42318]">{error}</p> : null}
+            {expandedIndex === index ? <div>
 
             <textarea
               value={question.prompt}
@@ -1068,8 +1288,9 @@ function QuizEditor({
                 ))}
               </div>
             ) : null}
+            </div> : null}
           </article>
-        ))}
+        );})}
       </div>
     </section>
   );
@@ -1099,7 +1320,6 @@ function LiveControl({
   const participants = state?.participants ?? [];
   const ranking = state?.ranking ?? participants;
   const submittedIds = new Set(answers.map((answer) => answer.participantId));
-  const phase = state?.phase ?? "lobby";
   const tiebreakError = validateRuntimeQuestion(tiebreakQuestion);
 
   function updateTiebreakQuestion(patch: Partial<QuizQuestion>) {
@@ -1165,23 +1385,6 @@ function LiveControl({
           <Button variant="outline" onClick={() => void onRefresh()} disabled={!code || busy}>
             <RefreshCw aria-hidden />
             동기화
-          </Button>
-        </div>
-
-        <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
-          <Button disabled={!code || !state || busy || phase !== "lobby"} onClick={() => void onAction(() => quizApi.startRoom(code), "게임을 시작했습니다.")}>
-            시작
-          </Button>
-          <Button disabled={!code || busy || phase !== "question"} variant="outline" onClick={() => void onAction(() => quizApi.closeQuestion(code), "제출을 마감했습니다.")}>
-            <X aria-hidden />
-            마감
-          </Button>
-          <Button disabled={!code || busy || phase !== "closed"} variant="outline" onClick={() => void onAction(() => quizApi.revealQuestion(code), "정답을 공개했습니다.")}>
-            <Eye aria-hidden />
-            공개
-          </Button>
-          <Button disabled={!code || busy || phase !== "revealed"} className="bg-[#ffcf4a] text-zinc-950 hover:bg-[#f2bd2f]" onClick={() => void onAction(() => quizApi.nextQuestion(code), "다음 문제로 이동했습니다.")}>
-            다음
           </Button>
         </div>
 

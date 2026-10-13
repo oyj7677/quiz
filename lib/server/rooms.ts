@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { getDb } from "@/db";
 import { answers, participants, quizzes, roomQuestions, rooms } from "@/db/schema";
 import { now, randomId, roomCode, sign } from "./crypto";
@@ -85,7 +85,9 @@ export function playerTokenFrom(request: Request) {
 
 export async function createRoom(quizId: string) {
   const db = getDb();
-  const quiz = await db.query.quizzes.findFirst({ where: eq(quizzes.id, quizId) });
+  const quiz = await db.query.quizzes.findFirst({
+    where: and(eq(quizzes.id, quizId), isNull(quizzes.deletedAt)),
+  });
   if (!quiz) {
     throw new Error("퀴즈를 찾을 수 없습니다.");
   }
@@ -133,24 +135,93 @@ export async function createRoom(quizId: string) {
 }
 
 export async function listRooms() {
-  const rows = await getDb().select().from(rooms).orderBy(desc(rooms.createdAt));
+  const rows = await getDb()
+    .select({
+      code: rooms.code,
+      phase: rooms.status,
+      title: rooms.title,
+      quizTitle: quizzes.title,
+      createdAt: rooms.createdAt,
+      startedAt: rooms.startedAt,
+      endedAt: rooms.endedAt,
+    })
+    .from(rooms)
+    .leftJoin(quizzes, eq(rooms.quizId, quizzes.id))
+    .where(isNull(rooms.deletedAt))
+    .orderBy(desc(rooms.createdAt));
   return rows.map((room) => ({
     code: room.code,
-    phase: room.status,
+    phase: room.phase,
+    title: room.title,
+    quizTitle: room.quizTitle ?? room.title,
     createdAt: iso(room.createdAt),
     startedAt: iso(room.startedAt),
     endedAt: iso(room.endedAt),
   }));
 }
 
+export async function listDeletedRooms() {
+  const rows = await getDb()
+    .select({
+      code: rooms.code,
+      phase: rooms.status,
+      title: rooms.title,
+      quizTitle: quizzes.title,
+      createdAt: rooms.createdAt,
+      startedAt: rooms.startedAt,
+      endedAt: rooms.endedAt,
+      deletedAt: rooms.deletedAt,
+    })
+    .from(rooms)
+    .leftJoin(quizzes, eq(rooms.quizId, quizzes.id))
+    .where(isNotNull(rooms.deletedAt))
+    .orderBy(desc(rooms.deletedAt));
+  return rows.map((room) => ({
+    code: room.code,
+    phase: room.phase,
+    title: room.title,
+    quizTitle: room.quizTitle ?? room.title,
+    createdAt: iso(room.createdAt),
+    startedAt: iso(room.startedAt),
+    endedAt: iso(room.endedAt),
+    deletedAt: iso(room.deletedAt),
+  }));
+}
+
 export async function deleteRoom(code: string) {
-  const deleted = await getDb().delete(rooms).where(eq(rooms.code, code)).returning();
+  const room = await getDb().query.rooms.findFirst({
+    where: and(eq(rooms.code, code), isNull(rooms.deletedAt)),
+  });
+  if (!room) {
+    return false;
+  }
+  if (room.status !== "finished") {
+    throw new Error("완료된 방만 삭제할 수 있습니다.");
+  }
+
+  const timestamp = now();
+  const deleted = await getDb()
+    .update(rooms)
+    .set({ deletedAt: timestamp, updatedAt: timestamp })
+    .where(and(eq(rooms.code, code), eq(rooms.status, "finished"), isNull(rooms.deletedAt)))
+    .returning();
   return deleted.length > 0;
+}
+
+export async function restoreRoom(code: string) {
+  const restored = await getDb()
+    .update(rooms)
+    .set({ deletedAt: null, updatedAt: now() })
+    .where(and(eq(rooms.code, code), isNotNull(rooms.deletedAt)))
+    .returning();
+  return restored.length > 0;
 }
 
 export async function joinRoom(code: string, nicknameRaw: string, reconnectToken?: string | null) {
   const db = getDb();
-  const room = await db.query.rooms.findFirst({ where: eq(rooms.code, code) });
+  const room = await db.query.rooms.findFirst({
+    where: and(eq(rooms.code, code), isNull(rooms.deletedAt)),
+  });
   if (!room) {
     throw new Error("방을 찾을 수 없습니다.");
   }
@@ -269,7 +340,9 @@ async function startPosition(room: DbRoom, position: number, allowedStatus: DbRo
 }
 
 async function getRoomOrThrow(code: string) {
-  const room = await getDb().query.rooms.findFirst({ where: eq(rooms.code, code) });
+  const room = await getDb().query.rooms.findFirst({
+    where: and(eq(rooms.code, code), isNull(rooms.deletedAt)),
+  });
   if (!room) {
     throw new Error("방을 찾을 수 없습니다.");
   }

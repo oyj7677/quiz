@@ -27,6 +27,18 @@ export type QuizSet = {
   questions: QuizQuestion[];
   createdAt?: string;
   updatedAt?: string;
+  deletedAt?: string;
+};
+
+export type RoomSummary = {
+  code: string;
+  phase?: RoomPhase;
+  title?: string;
+  quizTitle?: string;
+  createdAt?: string;
+  startedAt?: string;
+  endedAt?: string;
+  deletedAt?: string;
 };
 
 export type Participant = {
@@ -178,6 +190,12 @@ export const quizApi = {
   deleteQuiz(id: string) {
     return apiFetch<{ ok?: boolean }>(`/api/quizzes/${id}`, { method: "DELETE" });
   },
+  listDeletedQuizzes() {
+    return apiFetch<{ quizzes?: QuizSet[] }>("/api/quizzes/deleted");
+  },
+  restoreQuiz(id: string) {
+    return apiFetch<{ ok?: boolean }>(`/api/quizzes/${id}/restore`, { method: "POST" });
+  },
   uploadImage(file: File) {
     const form = new FormData();
     form.set("file", file);
@@ -193,10 +211,16 @@ export const quizApi = {
     });
   },
   listRooms() {
-    return apiFetch<{ rooms?: Array<{ code: string; phase?: RoomPhase; createdAt?: string }> }>("/api/rooms");
+    return apiFetch<{ rooms?: RoomSummary[] }>("/api/rooms");
   },
   deleteRoom(code: string) {
     return apiFetch<{ ok?: boolean }>(`/api/rooms/${code}`, { method: "DELETE" });
+  },
+  listDeletedRooms() {
+    return apiFetch<{ rooms?: RoomSummary[] }>("/api/rooms/deleted");
+  },
+  restoreRoom(code: string) {
+    return apiFetch<{ ok?: boolean }>(`/api/rooms/${code}/restore`, { method: "POST" });
   },
   roomState(code: string, playerToken?: string | null) {
     return apiFetch<RoomState>(`/api/rooms/${code}/state`, { playerToken });

@@ -15,6 +15,13 @@
       "when": 1791862579960,
       "tag": "0001_lush_komodo",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1791899663505,
+      "tag": "0002_safe_silver_surfer",
+      "breakpoints": true
     }
   ]
 }

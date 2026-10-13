@@ -31,7 +31,9 @@ export async function DELETE(request: Request, context: { params: Promise<{ id: 
   try {
     await requireHost(request);
     const { id } = await getRouteParam(context);
-    return json({ ok: await deleteQuiz(id) }, { headers: { "Cache-Control": "no-store" } });
+    return (await deleteQuiz(id))
+      ? json({ ok: true }, { headers: { "Cache-Control": "no-store" } })
+      : fail("quiz not found", 404);
   } catch (error) {
     const message = error instanceof Error ? error.message : "failed to delete quiz";
     return fail(message, isAuthError(error) ? 401 : 500);

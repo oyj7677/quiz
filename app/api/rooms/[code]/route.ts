@@ -6,9 +6,11 @@ export async function DELETE(request: Request, context: { params: Promise<{ code
   try {
     await requireHost(request);
     const { code } = await getRouteParam(context);
-    return json({ ok: await deleteRoom(code) }, { headers: { "Cache-Control": "no-store" } });
+    return (await deleteRoom(code))
+      ? json({ ok: true }, { headers: { "Cache-Control": "no-store" } })
+      : fail("room not found", 404);
   } catch (error) {
     const message = error instanceof Error ? error.message : "failed to delete room";
-    return fail(message, isAuthError(error) ? 401 : 500);
+    return fail(message, isAuthError(error) ? 401 : 400);
   }
 }

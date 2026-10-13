@@ -22,6 +22,7 @@ export const quizzes = sqliteTable("quizzes", {
   questionsJson: text("questions_json").notNull(),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
+  deletedAt: integer("deleted_at"),
 });
 
 export const rooms = sqliteTable("rooms", {
@@ -39,6 +40,7 @@ export const rooms = sqliteTable("rooms", {
   updatedAt: integer("updated_at").notNull(),
   startedAt: integer("started_at"),
   endedAt: integer("ended_at"),
+  deletedAt: integer("deleted_at"),
 });
 
 export const roomQuestions = sqliteTable(
