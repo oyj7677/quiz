@@ -141,8 +141,8 @@ export async function changeHostPassword(currentPassword: string, nextPassword: 
     throw new Error("현재 비밀번호가 올바르지 않습니다.");
   }
 
-  if (nextPassword.length < 12) {
-    throw new Error("새 비밀번호는 12자 이상이어야 합니다.");
+  if (nextPassword.length < 4) {
+    throw new Error("새 비밀번호는 4자 이상이어야 합니다.");
   }
 
   await db
