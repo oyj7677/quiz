@@ -1,0 +1,1 @@
+ALTER TABLE `rooms` ADD `scored_round` integer;
