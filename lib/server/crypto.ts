@@ -34,7 +34,8 @@ function base64ToBytes(value: string) {
 }
 
 export async function hashPassword(password: string) {
-  const iterations = 210_000;
+  // Cloudflare Workers limits PBKDF2 to 100,000 iterations.
+  const iterations = 100_000;
   const salt = new Uint8Array(16);
   crypto.getRandomValues(salt);
   const key = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, [
