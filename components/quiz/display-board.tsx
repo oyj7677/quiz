@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
 import { QrCode, Trophy, Users } from "lucide-react";
 import { BRAND_NAME } from "@/lib/client/brand";
 import { phaseLabel, questionNumberLabel, quizApi, RoomState } from "@/lib/client/quiz-api";
@@ -55,12 +54,12 @@ export function DisplayBoard({ code }: { code: string }) {
     <main className="min-h-screen overflow-hidden bg-[#f7f2e8] text-zinc-950">
       <header className="border-b-2 border-zinc-950 bg-white px-8 py-5">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-6">
-          <Link href="/" className="flex items-center gap-4 text-3xl font-black">
+          <a href="/" className="flex items-center gap-4 text-3xl font-black">
             <span className="grid h-14 w-14 place-items-center rounded-md bg-zinc-950 text-xl text-white">
               벨
             </span>
             {BRAND_NAME}
-          </Link>
+          </a>
           <div className="rounded-md bg-zinc-950 px-6 py-3 text-right text-white">
             <p className="text-sm font-bold text-zinc-300">참가 코드</p>
             <p className="text-5xl font-black tracking-normal">{normalizedCode}</p>

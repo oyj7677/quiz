@@ -1,7 +1,6 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { ArrowLeft, Check, Loader2, Send, Trophy } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -162,10 +161,10 @@ export function PlayerApp() {
     return (
       <main className="min-h-screen bg-[#f7f2e8] px-5 py-6 text-zinc-950">
         <section className="mx-auto flex min-h-[calc(100vh-48px)] w-full max-w-md flex-col justify-center">
-          <Link href="/" className="mb-8 inline-flex items-center gap-2 text-sm font-black text-zinc-600">
+          <a href="/" className="mb-8 inline-flex items-center gap-2 text-sm font-black text-zinc-600">
             <ArrowLeft aria-hidden className="size-4" />
             {BRAND_NAME}
-          </Link>
+          </a>
           <form onSubmit={join} className="rounded-md border-2 border-zinc-950 bg-white p-6 shadow-[8px_8px_0_#18181b]">
             <h1 className="text-3xl font-black">참가하기</h1>
             <p className="mt-2 text-sm leading-6 text-zinc-600">

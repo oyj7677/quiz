@@ -1,7 +1,6 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
 import {
   Check,
   Copy,
@@ -459,9 +458,9 @@ export function HostConsole() {
     return (
       <main className="min-h-screen bg-[#f7f2e8] px-5 py-6 text-zinc-950">
         <section className="mx-auto flex min-h-[calc(100vh-48px)] w-full max-w-md flex-col justify-center">
-          <Link href="/" className="mb-8 text-sm font-black text-zinc-600">
+          <a href="/" className="mb-8 text-sm font-black text-zinc-600">
             {BRAND_NAME}
-          </Link>
+          </a>
           <form onSubmit={onLogin} className="rounded-md border-2 border-zinc-950 bg-white p-6 shadow-[8px_8px_0_#18181b]">
             <h1 className="text-3xl font-black">진행자 로그인</h1>
             <p className="mt-2 text-sm leading-6 text-zinc-600">
@@ -500,10 +499,10 @@ export function HostConsole() {
     <main className="min-h-screen bg-[#f7f2e8] text-zinc-950">
       <header className="sticky top-0 z-20 border-b-2 border-zinc-950 bg-white/95 px-4 py-3 backdrop-blur sm:px-6">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3">
-          <Link href="/" className="flex items-center gap-3 font-black">
+          <a href="/" className="flex items-center gap-3 font-black">
             <span className="grid h-10 w-10 place-items-center rounded-md bg-zinc-950 text-white">벨</span>
             {BRAND_NAME} 진행자
-          </Link>
+          </a>
           <div className="flex flex-wrap items-center gap-2">
             <input
               value={activeCode}
@@ -716,10 +715,10 @@ function RoomCard({
         </Button>
       </div>
       <Button asChild variant="outline" className="mt-2 w-full" disabled={!activeCode}>
-        <Link href={activeCode ? `/display/${activeCode}` : "/host"} target="_blank">
+        <a href={activeCode ? `/display/${activeCode}` : "/host"} target="_blank" rel="noopener noreferrer">
           <MonitorPlay aria-hidden />
           발표 화면 열기
-        </Link>
+        </a>
       </Button>
       <div className="mt-4 grid grid-cols-3 gap-2 text-center">
         <Metric label="참가" value={participants.length} />

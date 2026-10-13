@@ -1,14 +1,11 @@
 "use client";
 
-import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 import { ArrowRight, Laptop, QrCode, Smartphone, Trophy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BRAND_NAME } from "@/lib/client/brand";
 
 export function Landing() {
-  const router = useRouter();
   const [code, setCode] = useState("");
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
@@ -16,7 +13,7 @@ export function Landing() {
     const normalized = code.trim().toUpperCase();
 
     if (normalized) {
-      router.push(`/join?code=${encodeURIComponent(normalized)}`);
+      window.location.assign(`/join?code=${encodeURIComponent(normalized)}`);
     }
   }
 
@@ -25,14 +22,14 @@ export function Landing() {
       <section className="mx-auto grid min-h-screen w-full max-w-7xl gap-10 px-5 py-6 sm:px-8 lg:grid-cols-[1.05fr_0.95fr] lg:px-10">
         <div className="flex flex-col justify-between gap-10">
           <header className="flex items-center justify-between gap-4">
-            <Link href="/" className="flex items-center gap-3 font-black">
+            <a href="/" className="flex items-center gap-3 font-black">
               <span className="grid h-11 w-11 place-items-center rounded-md bg-[#18181b] text-lg text-white">
                 벨
               </span>
               <span className="text-xl">{BRAND_NAME}</span>
-            </Link>
+            </a>
             <Button asChild variant="outline" className="border-[#18181b]/20 bg-white/80">
-              <Link href="/host">진행자 입장</Link>
+              <a href="/host">진행자 입장</a>
             </Button>
           </header>
 

@@ -23,6 +23,15 @@ const eslintConfig = defineConfig([
       "react-hooks/set-state-in-effect": "off",
     },
   },
+  {
+    files: ["components/quiz/{landing,host-console,player-app,display-board}.tsx"],
+    rules: {
+      // Vinext client navigation fails in the deployed Worker; full page
+      // navigation keeps these routes usable until that runtime is fixed.
+      "@next/next/no-html-link-for-pages": "off",
+      "@next/next/no-location-assign-relative-destination": "off",
+    },
+  },
 ]);
 
 export default eslintConfig;
