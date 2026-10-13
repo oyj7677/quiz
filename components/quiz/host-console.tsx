@@ -622,7 +622,15 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
         {view === "rooms" ? (
           <div>
             <PageHeading title={roomCode ? `진행 방 ${activeCode}` : "진행 중인 방"} description={roomCode ? "대기실과 문제 진행을 한곳에서 관리합니다." : "방을 선택해 참가 안내와 진행 콘솔을 엽니다."} />
-            {roomCode ? (
+            {roomCode && state?.phase === "finished" ? (
+              <div className="space-y-5">
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border-2 border-zinc-950 bg-[#ffcf4a] p-5">
+                  <p className="font-black">이 방의 게임이 종료되었습니다.</p>
+                  <Button asChild className="bg-zinc-950 text-white"><a href={`/host/results/${activeCode}`}>결과 화면 보기</a></Button>
+                </div>
+                <ResultDetail state={state} selected />
+              </div>
+            ) : roomCode ? (
               <div className="grid items-start gap-5 lg:grid-cols-[340px_minmax(0,1fr)]">
                 <RoomCard activeCode={activeCode} joinUrl={joinUrl} qrUrl={qrUrl} state={state} onCopy={(text) => void navigator.clipboard?.writeText(text)} />
                 <LiveControl code={activeCode} state={state} busy={busy} onAction={roomAction} onRefresh={() => refreshState()} />
