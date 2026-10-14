@@ -4,9 +4,9 @@ import { restoreRoom } from "@/lib/server/rooms";
 
 export async function POST(request: Request, context: { params: Promise<{ code: string }> }) {
   try {
-    await requireHost(request);
+    const { username } = await requireHost(request);
     const { code } = await getRouteParam(context);
-    return (await restoreRoom(code))
+    return (await restoreRoom(username, code))
       ? json({ ok: true }, { headers: { "Cache-Control": "no-store" } })
       : fail("deleted room not found", 404);
   } catch (error) {

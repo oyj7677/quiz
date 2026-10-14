@@ -3,6 +3,7 @@ declare namespace Cloudflare {
     DB?: D1Database;
     BUCKET?: R2Bucket;
     HOST_BOOTSTRAP_PASSWORD?: string;
+    OYJ_BOOTSTRAP_PASSWORD?: string;
     SESSION_SECRET?: string;
   }
 }

@@ -23,31 +23,32 @@ export function toQuiz(row: typeof quizzes.$inferSelect) {
   };
 }
 
-export async function listQuizzes() {
+export async function listQuizzes(ownerUsername: string) {
   const rows = await getDb()
     .select()
     .from(quizzes)
-    .where(isNull(quizzes.deletedAt))
+    .where(and(eq(quizzes.ownerUsername, ownerUsername), isNull(quizzes.deletedAt)))
     .orderBy(desc(quizzes.updatedAt));
   return rows.map(toQuiz);
 }
 
-export async function listDeletedQuizzes() {
+export async function listDeletedQuizzes(ownerUsername: string) {
   const rows = await getDb()
     .select()
     .from(quizzes)
-    .where(isNotNull(quizzes.deletedAt))
+    .where(and(eq(quizzes.ownerUsername, ownerUsername), isNotNull(quizzes.deletedAt)))
     .orderBy(desc(quizzes.deletedAt));
   return rows.map(toQuiz);
 }
 
-export async function createQuiz(payload: QuizPayload) {
+export async function createQuiz(ownerUsername: string, payload: QuizPayload) {
   const parsed = validateQuizPayload(payload);
   const timestamp = now();
   const [quiz] = await getDb()
     .insert(quizzes)
     .values({
       id: randomId("quiz_"),
+      ownerUsername,
       title: parsed.title,
       description: parsed.description,
       questionsJson: JSON.stringify(parsed.questions),
@@ -58,14 +59,14 @@ export async function createQuiz(payload: QuizPayload) {
   return toQuiz(quiz);
 }
 
-export async function getQuiz(id: string) {
+export async function getQuiz(ownerUsername: string, id: string) {
   const quiz = await getDb().query.quizzes.findFirst({
-    where: and(eq(quizzes.id, id), isNull(quizzes.deletedAt)),
+    where: and(eq(quizzes.id, id), eq(quizzes.ownerUsername, ownerUsername), isNull(quizzes.deletedAt)),
   });
   return quiz ? toQuiz(quiz) : null;
 }
 
-export async function updateQuiz(id: string, payload: QuizPayload) {
+export async function updateQuiz(ownerUsername: string, id: string, payload: QuizPayload) {
   const parsed = validateQuizPayload(payload);
   const [quiz] = await getDb()
     .update(quizzes)
@@ -75,26 +76,26 @@ export async function updateQuiz(id: string, payload: QuizPayload) {
       questionsJson: JSON.stringify(parsed.questions),
       updatedAt: now(),
     })
-    .where(and(eq(quizzes.id, id), isNull(quizzes.deletedAt)))
+    .where(and(eq(quizzes.id, id), eq(quizzes.ownerUsername, ownerUsername), isNull(quizzes.deletedAt)))
     .returning();
   return quiz ? toQuiz(quiz) : null;
 }
 
-export async function deleteQuiz(id: string) {
+export async function deleteQuiz(ownerUsername: string, id: string) {
   const timestamp = now();
   const result = await getDb()
     .update(quizzes)
     .set({ deletedAt: timestamp, updatedAt: timestamp })
-    .where(and(eq(quizzes.id, id), isNull(quizzes.deletedAt)))
+    .where(and(eq(quizzes.id, id), eq(quizzes.ownerUsername, ownerUsername), isNull(quizzes.deletedAt)))
     .returning();
   return result.length > 0;
 }
 
-export async function restoreQuiz(id: string) {
+export async function restoreQuiz(ownerUsername: string, id: string) {
   const result = await getDb()
     .update(quizzes)
     .set({ deletedAt: null, updatedAt: now() })
-    .where(and(eq(quizzes.id, id), isNotNull(quizzes.deletedAt)))
+    .where(and(eq(quizzes.id, id), eq(quizzes.ownerUsername, ownerUsername), isNotNull(quizzes.deletedAt)))
     .returning();
   return result.length > 0;
 }

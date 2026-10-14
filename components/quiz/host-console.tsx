@@ -279,7 +279,7 @@ const hostNavigation: Array<{ view: HostView; href: string; label: string }> = [
 ];
 
 export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView; roomCode?: string }) {
-  const [username, setUsername] = useState("ming");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [loggedIn, setLoggedIn] = useState(false);
   const [checking, setChecking] = useState(true);
@@ -355,7 +355,8 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
   useEffect(() => {
     quizApi
       .getHost()
-      .then(() => {
+      .then((result) => {
+        setUsername(result.host?.username ?? "");
         setLoggedIn(true);
         return Promise.all([loadQuizzes(), loadRooms(), loadDeletedItems()]);
       })
@@ -455,6 +456,7 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
     const result = await run(() => quizApi.hostLogin(username, password), "진행자 로그인이 완료되었습니다.");
 
     if (result) {
+      setUsername(result.host?.username ?? username);
       setPassword("");
       setLoggedIn(true);
       await Promise.all([loadQuizzes(), loadRooms(), loadDeletedItems()]);
@@ -688,6 +690,9 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
               id="username"
               value={username}
               onChange={(event) => setUsername(event.target.value)}
+              autoComplete="username"
+              required
+              placeholder="진행자 ID"
               className="mt-2 h-12 w-full rounded-md border border-zinc-300 px-3 font-bold outline-none focus:border-zinc-950 focus:ring-4 focus:ring-[#ffcf4a]/50"
             />
             <label className="mt-4 block text-sm font-bold" htmlFor="password">
@@ -719,13 +724,21 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 pb-3">
           <a href="/host" className="flex items-center gap-3 font-black">
             <span className="grid h-10 w-10 place-items-center rounded-md bg-zinc-950 text-white">벨</span>
-            {BRAND_NAME} 진행자
+            {BRAND_NAME} · {username || "진행자"}
           </a>
           <Button
             variant="outline"
             onClick={() => {
               if (dirty && !window.confirm("저장되지 않은 변경사항이 있습니다. 저장하지 않고 로그아웃할까요?")) return;
-              void quizApi.hostLogout().finally(() => setLoggedIn(false));
+              void quizApi.hostLogout().finally(() => {
+                setLoggedIn(false);
+                setQuizzes([]);
+                setRooms([]);
+                setDeletedQuizzes([]);
+                setDeletedRooms([]);
+                setState(null);
+                setActiveCode("");
+              });
             }}
           >
             <LogOut aria-hidden />

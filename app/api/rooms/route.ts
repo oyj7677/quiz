@@ -4,8 +4,8 @@ import { fail, json, readJson } from "@/lib/server/http";
 
 export async function GET(request: Request) {
   try {
-    await requireHost(request);
-    return json({ rooms: await listRooms() }, { headers: { "Cache-Control": "no-store" } });
+    const { username } = await requireHost(request);
+    return json({ rooms: await listRooms(username) }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     const message = error instanceof Error ? error.message : "failed to list rooms";
     return fail(message, isAuthError(error) ? 401 : 500);
@@ -14,9 +14,9 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    await requireHost(request);
+    const { username } = await requireHost(request);
     const payload = await readJson<{ quizId?: string }>(request);
-    const code = await createRoom(payload.quizId ?? "");
+    const code = await createRoom(username, payload.quizId ?? "");
     return json({ code, room: { code } }, { status: 201, headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     const message = error instanceof Error ? error.message : "failed to create room";

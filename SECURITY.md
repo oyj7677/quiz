@@ -4,7 +4,7 @@
 
 ## 비밀값
 
-- 진행자 비밀번호는 `HOST_BOOTSTRAP_PASSWORD` runtime secret으로 설정합니다.
+- `ming`, `oyj` 진행자의 최초 비밀번호는 각각 `HOST_BOOTSTRAP_PASSWORD`, `OYJ_BOOTSTRAP_PASSWORD` runtime secret으로 설정합니다. 로그인 후에는 계정별로 해시된 비밀번호를 저장합니다.
 - 세션 서명값은 `SESSION_SECRET` runtime secret으로 설정합니다.
 - 로컬 Worker 개발 값은 `.dev.vars`처럼 Git에서 제외되는 파일에 둡니다.
 - 예시 키 이름만 `.env.example`에 남깁니다.

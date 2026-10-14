@@ -16,10 +16,10 @@ async function readOptions(request: Request) {
 
 export async function POST(request: Request, context: { params: Promise<{ code: string }> }) {
   try {
-    await requireHost(request);
+    const { username } = await requireHost(request);
     const { code } = await getRouteParam(context);
-    await nextQuestion(code, await readOptions(request));
-    return json(await getRoomState(code, "host"), { headers: { "Cache-Control": "no-store" } });
+    await nextQuestion(username, code, await readOptions(request));
+    return json(await getRoomState(code, "host", null, username), { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     const message = error instanceof Error ? error.message : "failed to move next";
     return fail(message, isAuthError(error) ? 401 : 400);

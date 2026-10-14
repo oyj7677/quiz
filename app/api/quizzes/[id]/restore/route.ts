@@ -4,9 +4,9 @@ import { restoreQuiz } from "@/lib/server/quizzes";
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
-    await requireHost(request);
+    const { username } = await requireHost(request);
     const { id } = await getRouteParam(context);
-    return (await restoreQuiz(id))
+    return (await restoreQuiz(username, id))
       ? json({ ok: true }, { headers: { "Cache-Control": "no-store" } })
       : fail("deleted quiz not found", 404);
   } catch (error) {

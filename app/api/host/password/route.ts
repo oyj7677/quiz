@@ -3,9 +3,9 @@ import { fail, json, readJson } from "@/lib/server/http";
 
 export async function POST(request: Request) {
   try {
-    await requireHost(request);
+    const host = await requireHost(request);
     const payload = await readJson<{ currentPassword?: string; newPassword?: string }>(request);
-    await changeHostPassword(payload.currentPassword ?? "", payload.newPassword ?? "");
+    await changeHostPassword(host.username, payload.currentPassword ?? "", payload.newPassword ?? "");
     return json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     const message = error instanceof Error ? error.message : "password change failed";

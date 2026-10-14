@@ -6,7 +6,7 @@ export function getRuntimeEnv() {
   return env as RuntimeEnv;
 }
 
-export function requireSecret(name: "HOST_BOOTSTRAP_PASSWORD" | "SESSION_SECRET") {
+export function requireSecret(name: "HOST_BOOTSTRAP_PASSWORD" | "OYJ_BOOTSTRAP_PASSWORD" | "SESSION_SECRET") {
   const value = getRuntimeEnv()[name];
 
   if (!value) {

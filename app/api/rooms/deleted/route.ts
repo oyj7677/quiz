@@ -4,8 +4,8 @@ import { listDeletedRooms } from "@/lib/server/rooms";
 
 export async function GET(request: Request) {
   try {
-    await requireHost(request);
-    return json({ rooms: await listDeletedRooms() }, { headers: { "Cache-Control": "no-store" } });
+    const { username } = await requireHost(request);
+    return json({ rooms: await listDeletedRooms(username) }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     const message = error instanceof Error ? error.message : "failed to list deleted rooms";
     return fail(message, isAuthError(error) ? 401 : 500);

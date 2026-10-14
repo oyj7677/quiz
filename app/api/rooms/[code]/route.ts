@@ -4,9 +4,9 @@ import { fail, getRouteParam, json } from "@/lib/server/http";
 
 export async function DELETE(request: Request, context: { params: Promise<{ code: string }> }) {
   try {
-    await requireHost(request);
+    const { username } = await requireHost(request);
     const { code } = await getRouteParam(context);
-    return (await deleteRoom(code))
+    return (await deleteRoom(username, code))
       ? json({ ok: true }, { headers: { "Cache-Control": "no-store" } })
       : fail("room not found", 404);
   } catch (error) {

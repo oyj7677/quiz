@@ -17,6 +17,7 @@ export const hostSessions = sqliteTable("host_sessions", {
 
 export const quizzes = sqliteTable("quizzes", {
   id: text("id").primaryKey(),
+  ownerUsername: text("owner_username").notNull().default("ming"),
   title: text("title").notNull(),
   description: text("description").notNull().default(""),
   questionsJson: text("questions_json").notNull(),
@@ -27,6 +28,7 @@ export const quizzes = sqliteTable("quizzes", {
 
 export const rooms = sqliteTable("rooms", {
   code: text("code").primaryKey(),
+  ownerUsername: text("owner_username").notNull().default("ming"),
   quizId: text("quiz_id").references(() => quizzes.id, { onDelete: "set null" }),
   status: text("status", {
     enum: ["lobby", "question", "closed", "revealed", "finished"],

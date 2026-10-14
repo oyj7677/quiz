@@ -6,7 +6,16 @@ import { requireSecret } from "./env";
 
 const COOKIE_NAME = "golden_session";
 const SESSION_MS = 7 * 24 * 60 * 60 * 1000;
-const HOST_USERNAME = "ming";
+function bootstrapSecretFor(username: string) {
+  switch (username) {
+    case "ming":
+      return "HOST_BOOTSTRAP_PASSWORD";
+    case "oyj":
+      return "OYJ_BOOTSTRAP_PASSWORD";
+    default:
+      return null;
+  }
+}
 
 export class AuthError extends Error {
   constructor(message = "로그인이 필요합니다.") {
@@ -53,12 +62,13 @@ async function readSessionId(request: Request) {
 }
 
 export async function loginHost(username: string, password: string, secureCookie: boolean) {
-  if (username !== HOST_USERNAME) {
+  const bootstrapSecret = bootstrapSecretFor(username);
+  if (!bootstrapSecret) {
     return null;
   }
 
   const db = getDb();
-  const existing = await db.query.hostAuth.findFirst({ where: eq(hostAuth.username, HOST_USERNAME) });
+  const existing = await db.query.hostAuth.findFirst({ where: eq(hostAuth.username, username) });
   const timestamp = now();
 
   if (existing) {
@@ -67,30 +77,35 @@ export async function loginHost(username: string, password: string, secureCookie
       return null;
     }
   } else {
-    const bootstrapPassword = requireSecret("HOST_BOOTSTRAP_PASSWORD");
+    const bootstrapPassword = requireSecret(bootstrapSecret);
     if (password !== bootstrapPassword) {
       return null;
     }
 
     await db.insert(hostAuth).values({
-      username: HOST_USERNAME,
+      username,
       passwordHash: await hashPassword(password),
       createdAt: timestamp,
       updatedAt: timestamp,
-    });
+    }).onConflictDoNothing();
+
+    const provisioned = await db.query.hostAuth.findFirst({ where: eq(hostAuth.username, username) });
+    if (!provisioned || !(await verifyPassword(password, provisioned.passwordHash))) {
+      return null;
+    }
   }
 
   const sessionId = randomId("sess_");
   await db.delete(hostSessions).where(lt(hostSessions.expiresAt, timestamp));
   await db.insert(hostSessions).values({
     id: sessionId,
-    username: HOST_USERNAME,
+    username,
     createdAt: timestamp,
     expiresAt: timestamp + SESSION_MS,
   });
 
   return {
-    username: HOST_USERNAME,
+    username,
     cookie: `${COOKIE_NAME}=${encodeURIComponent(await signedSessionValue(sessionId))}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${Math.floor(
       SESSION_MS / 1000
     )}${secureCookie ? "; Secure" : ""}`,
@@ -133,9 +148,9 @@ export function clearSessionCookie() {
   return `${COOKIE_NAME}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`;
 }
 
-export async function changeHostPassword(currentPassword: string, nextPassword: string) {
+export async function changeHostPassword(username: string, currentPassword: string, nextPassword: string) {
   const db = getDb();
-  const existing = await db.query.hostAuth.findFirst({ where: eq(hostAuth.username, HOST_USERNAME) });
+  const existing = await db.query.hostAuth.findFirst({ where: eq(hostAuth.username, username) });
 
   if (!existing || !(await verifyPassword(currentPassword, existing.passwordHash))) {
     throw new Error("현재 비밀번호가 올바르지 않습니다.");
@@ -148,6 +163,6 @@ export async function changeHostPassword(currentPassword: string, nextPassword: 
   await db
     .update(hostAuth)
     .set({ passwordHash: await hashPassword(nextPassword), updatedAt: now() })
-    .where(eq(hostAuth.username, HOST_USERNAME));
-  await db.delete(hostSessions).where(eq(hostSessions.username, HOST_USERNAME));
+    .where(eq(hostAuth.username, username));
+  await db.delete(hostSessions).where(eq(hostSessions.username, username));
 }

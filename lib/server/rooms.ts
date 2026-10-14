@@ -159,10 +159,10 @@ export function playerTokenFrom(request: Request) {
   return request.headers.get("x-player-token");
 }
 
-export async function createRoom(quizId: string) {
+export async function createRoom(ownerUsername: string, quizId: string) {
   const db = getDb();
   const quiz = await db.query.quizzes.findFirst({
-    where: and(eq(quizzes.id, quizId), isNull(quizzes.deletedAt)),
+    where: and(eq(quizzes.id, quizId), eq(quizzes.ownerUsername, ownerUsername), isNull(quizzes.deletedAt)),
   });
   if (!quiz) {
     throw new Error("퀴즈를 찾을 수 없습니다.");
@@ -185,6 +185,7 @@ export async function createRoom(quizId: string) {
   await db.insert(rooms).values({
     code,
     quizId,
+    ownerUsername,
     status: "lobby",
     currentPosition: null,
     currentCategory: "regular",
@@ -219,7 +220,7 @@ export async function createRoom(quizId: string) {
   return code;
 }
 
-export async function listRooms() {
+export async function listRooms(ownerUsername: string) {
   const rows = await getDb()
     .select({
       code: rooms.code,
@@ -232,7 +233,7 @@ export async function listRooms() {
     })
     .from(rooms)
     .leftJoin(quizzes, eq(rooms.quizId, quizzes.id))
-    .where(isNull(rooms.deletedAt))
+    .where(and(eq(rooms.ownerUsername, ownerUsername), isNull(rooms.deletedAt)))
     .orderBy(desc(rooms.createdAt));
   return rows.map((room) => ({
     code: room.code,
@@ -245,7 +246,7 @@ export async function listRooms() {
   }));
 }
 
-export async function listDeletedRooms() {
+export async function listDeletedRooms(ownerUsername: string) {
   const rows = await getDb()
     .select({
       code: rooms.code,
@@ -259,7 +260,7 @@ export async function listDeletedRooms() {
     })
     .from(rooms)
     .leftJoin(quizzes, eq(rooms.quizId, quizzes.id))
-    .where(isNotNull(rooms.deletedAt))
+    .where(and(eq(rooms.ownerUsername, ownerUsername), isNotNull(rooms.deletedAt)))
     .orderBy(desc(rooms.deletedAt));
   return rows.map((room) => ({
     code: room.code,
@@ -273,9 +274,9 @@ export async function listDeletedRooms() {
   }));
 }
 
-export async function deleteRoom(code: string) {
+export async function deleteRoom(ownerUsername: string, code: string) {
   const room = await getDb().query.rooms.findFirst({
-    where: and(eq(rooms.code, code), isNull(rooms.deletedAt)),
+    where: and(eq(rooms.code, code), eq(rooms.ownerUsername, ownerUsername), isNull(rooms.deletedAt)),
   });
   if (!room) {
     return false;
@@ -288,16 +289,16 @@ export async function deleteRoom(code: string) {
   const deleted = await getDb()
     .update(rooms)
     .set({ deletedAt: timestamp, updatedAt: timestamp })
-    .where(and(eq(rooms.code, code), eq(rooms.status, "finished"), isNull(rooms.deletedAt)))
+    .where(and(eq(rooms.code, code), eq(rooms.ownerUsername, ownerUsername), eq(rooms.status, "finished"), isNull(rooms.deletedAt)))
     .returning();
   return deleted.length > 0;
 }
 
-export async function restoreRoom(code: string) {
+export async function restoreRoom(ownerUsername: string, code: string) {
   const restored = await getDb()
     .update(rooms)
     .set({ deletedAt: null, updatedAt: now() })
-    .where(and(eq(rooms.code, code), isNotNull(rooms.deletedAt)))
+    .where(and(eq(rooms.code, code), eq(rooms.ownerUsername, ownerUsername), isNotNull(rooms.deletedAt)))
     .returning();
   return restored.length > 0;
 }
@@ -524,9 +525,13 @@ async function startQuestion(
   }
 }
 
-async function getRoomOrThrow(code: string) {
+async function getRoomOrThrow(code: string, ownerUsername?: string) {
   const room = await getDb().query.rooms.findFirst({
-    where: and(eq(rooms.code, code), isNull(rooms.deletedAt)),
+    where: and(
+      eq(rooms.code, code),
+      isNull(rooms.deletedAt),
+      ownerUsername !== undefined ? eq(rooms.ownerUsername, ownerUsername) : undefined
+    ),
   });
   if (!room) {
     throw new Error("방을 찾을 수 없습니다.");
@@ -534,8 +539,16 @@ async function getRoomOrThrow(code: string) {
   return room;
 }
 
-export async function startRoom(code: string, options: { category?: QuestionCategory; questionId?: string; selectionMode?: unknown } = {}) {
-  const room = await getRoomOrThrow(code);
+export async function isRoomOwnedBy(ownerUsername: string, code: string) {
+  const room = await getDb().query.rooms.findFirst({
+    columns: { code: true },
+    where: and(eq(rooms.code, code), eq(rooms.ownerUsername, ownerUsername), isNull(rooms.deletedAt)),
+  });
+  return Boolean(room);
+}
+
+export async function startRoom(ownerUsername: string, code: string, options: { category?: QuestionCategory; questionId?: string; selectionMode?: unknown } = {}) {
+  const room = await getRoomOrThrow(code, ownerUsername);
   if (room.status !== "lobby") {
     throw new Error("이미 시작된 게임입니다.");
   }
@@ -607,8 +620,8 @@ export async function submitAnswer(code: string, token: string | null, value: un
   }
 }
 
-export async function closeQuestion(code: string) {
-  const room = await getRoomOrThrow(code);
+export async function closeQuestion(ownerUsername: string, code: string) {
+  const room = await getRoomOrThrow(code, ownerUsername);
   if (room.status !== "question") {
     throw new Error("현재 제출 중인 문제가 없습니다.");
   }
@@ -616,7 +629,7 @@ export async function closeQuestion(code: string) {
   const updated = await getDb()
     .update(rooms)
     .set({ status: "closed", acceptingAnswers: false, updatedAt: now() })
-    .where(and(eq(rooms.code, code), eq(rooms.status, "question"), eq(rooms.acceptingAnswers, true)))
+    .where(and(eq(rooms.code, code), eq(rooms.ownerUsername, ownerUsername), eq(rooms.status, "question"), eq(rooms.acceptingAnswers, true)))
     .returning();
 
   if (!updated.length) {
@@ -624,8 +637,8 @@ export async function closeQuestion(code: string) {
   }
 }
 
-export async function gradeAnswer(code: string, participantId: string, correct: boolean) {
-  const room = await getRoomOrThrow(code);
+export async function gradeAnswer(ownerUsername: string, code: string, participantId: string, correct: boolean) {
+  const room = await getRoomOrThrow(code, ownerUsername);
   if (room.status !== "closed") {
     throw new Error("채점은 마감 후 공개 전까지만 가능합니다.");
   }
@@ -657,19 +670,20 @@ export async function gradeAnswer(code: string, participantId: string, correct: 
         and exists (
           select 1 from rooms
           where rooms.code = answers.room_code
+            and rooms.owner_username = ?
             and rooms.status = 'closed'
             and rooms.round_number = answers.round_number
         )`
     )
-    .bind(correct ? 1 : 0, timestamp, existing.id)
+    .bind(correct ? 1 : 0, timestamp, existing.id, ownerUsername)
     .run();
   if (!result.meta?.changes) {
     throw new Error("채점 가능한 시간이 지났습니다.");
   }
 }
 
-export async function revealQuestion(code: string) {
-  const room = await getRoomOrThrow(code);
+export async function revealQuestion(ownerUsername: string, code: string) {
+  const room = await getRoomOrThrow(code, ownerUsername);
   if (room.status !== "closed") {
     throw new Error("문제를 마감한 뒤 공개할 수 있습니다.");
   }
@@ -816,10 +830,11 @@ async function restoreAllWrongFinalists(room: DbRoom) {
 }
 
 export async function nextQuestion(
+  ownerUsername: string,
   code: string,
   options: { category?: QuestionCategory; questionId?: string; selectionMode?: unknown } = {}
 ) {
-  const room = await getRoomOrThrow(code);
+  const room = await getRoomOrThrow(code, ownerUsername);
   if (room.status !== "revealed") {
     throw new Error("현재 문제의 정답을 먼저 공개해 주세요.");
   }
@@ -845,11 +860,11 @@ export async function nextQuestion(
     }
   }
 
-  await startQuestion(await getRoomOrThrow(code), category, ["revealed"], options);
+  await startQuestion(await getRoomOrThrow(code, ownerUsername), category, ["revealed"], options);
 }
 
-export async function startRevival(code: string, options: { questionId?: string; selectionMode?: unknown } = {}) {
-  const room = await getRoomOrThrow(code);
+export async function startRevival(ownerUsername: string, code: string, options: { questionId?: string; selectionMode?: unknown } = {}) {
+  const room = await getRoomOrThrow(code, ownerUsername);
   if (room.status !== "revealed") {
     throw new Error("정답 공개 후 패자부활전을 열 수 있습니다.");
   }
@@ -857,9 +872,9 @@ export async function startRevival(code: string, options: { questionId?: string;
   await startQuestion(room, "revival", ["revealed"], options);
 }
 
-export async function createTiebreaker(code: string, input: unknown) {
+export async function createTiebreaker(ownerUsername: string, code: string, input: unknown) {
   const db = getDb();
-  const room = await getRoomOrThrow(code);
+  const room = await getRoomOrThrow(code, ownerUsername);
   if (room.status !== "revealed") {
     throw new Error("정답 공개 후 동점자 문제를 추가할 수 있습니다.");
   }
@@ -898,8 +913,8 @@ export async function createTiebreaker(code: string, input: unknown) {
   await startQuestion(room, "tiebreaker", ["revealed"], { questionId: inserted?.id });
 }
 
-export async function finishRoom(code: string) {
-  const room = await getRoomOrThrow(code);
+export async function finishRoom(ownerUsername: string, code: string) {
+  const room = await getRoomOrThrow(code, ownerUsername);
   if (room.status !== "revealed" && room.status !== "question" && room.status !== "closed") {
     throw new Error("정답 공개 후 게임을 마무리할 수 있습니다.");
   }
@@ -937,12 +952,15 @@ export async function finishRoom(code: string) {
   await getDb()
     .update(rooms)
     .set({ status: "finished", acceptingAnswers: false, endedAt: timestamp, updatedAt: timestamp })
-    .where(eq(rooms.code, code));
+    .where(and(eq(rooms.code, code), eq(rooms.ownerUsername, ownerUsername)));
 }
 
-export async function getRoomState(code: string, role: Role, playerToken?: string | null) {
+export async function getRoomState(code: string, role: Role, playerToken?: string | null, ownerUsername?: string) {
+  if (role === "host" && !ownerUsername) {
+    throw new Error("방을 찾을 수 없습니다.");
+  }
   const db = getDb();
-  const room = await getRoomOrThrow(code);
+  const room = await getRoomOrThrow(code, role === "host" ? ownerUsername : undefined);
   const [participantRows, answerRows, questionRow, quizRow, me] = await Promise.all([
     db.select().from(participants).where(eq(participants.roomCode, code)).orderBy(asc(participants.joinedAt)),
     db
