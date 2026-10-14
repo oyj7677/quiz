@@ -6,6 +6,7 @@ import {
   ChevronUp,
   Check,
   Copy,
+  GripVertical,
   ImagePlus,
   LogOut,
   MonitorPlay,
@@ -25,17 +26,44 @@ import {
   questionNumberLabel,
   Participant,
   quizApi,
+  QuestionCategory,
   QuizQuestion,
   QuizSet,
   RoomState,
   unwrapQuiz,
 } from "@/lib/client/quiz-api";
 
+type QuestionPool = QuestionCategory;
+type ExtendedRoomState = RoomState & {
+  room?: NonNullable<RoomState["room"]> & {
+    activeCount?: number;
+    submittedCount?: number;
+    needsTiebreaker?: boolean;
+    currentPool?: QuestionPool;
+    playMode?: "random" | "sequential";
+    previewQuestion?: QuizQuestion | null;
+  };
+  availableQuestions?: Partial<Record<QuestionPool, QuizQuestion[]>>;
+};
+
+const poolLabels: Record<QuestionPool, string> = {
+  regular: "일반 문제",
+  revival: "패자부활 문제",
+  tiebreaker: "동점자 문제",
+};
+
+const poolDescriptions: Record<QuestionPool, string> = {
+  regular: "생존자가 답을 제출하고 탈락자는 관전합니다.",
+  revival: "정답 공개 후 진행자가 열면 탈락자 전원이 참여합니다.",
+  tiebreaker: "마무리 때 동점 우승 후보만 가리는 문제입니다.",
+};
+
 const sampleQuiz: QuizSet = {
   title: "새 골든벨 문제 세트",
   description: "오프라인 행사에서 바로 사용할 수 있는 기본 세트",
   questions: [
     {
+      category: "regular",
       kind: "ox",
       prompt: "골든벨 퀴즈는 진행자가 마감하기 전까지 답을 바꿀 수 있다.",
       options: ["O", "X"],
@@ -44,6 +72,7 @@ const sampleQuiz: QuizSet = {
       images: [],
     },
     {
+      category: "regular",
       kind: "multiple",
       prompt: "행사장에서 참석자가 퀴즈에 참여하는 기본 장치는?",
       options: ["휴대폰", "종이 답안지", "무전기", "리모컨"],
@@ -80,17 +109,68 @@ function aliveCount(participants: Participant[] = []) {
   return participants.filter((participant) => !participant.eliminated).length;
 }
 
+const questionCategories: Array<{ value: QuestionCategory; label: string; description: string }> = [
+  { value: "regular", label: poolLabels.regular, description: poolDescriptions.regular },
+  { value: "revival", label: poolLabels.revival, description: poolDescriptions.revival },
+  { value: "tiebreaker", label: poolLabels.tiebreaker, description: poolDescriptions.tiebreaker },
+];
+
+function questionCategory(question: QuizQuestion): QuestionCategory {
+  if (question.category === "revival" || question.category === "tiebreaker" || question.category === "regular") {
+    return question.category;
+  }
+
+  return question.isTiebreaker ? "tiebreaker" : "regular";
+}
+
+function categoryLabel(category: QuestionCategory) {
+  return questionCategories.find((item) => item.value === category)?.label ?? "일반 문제";
+}
+
+function questionKindLabel(kind: QuizQuestion["kind"]) {
+  switch (kind) {
+    case "ox":
+      return "O/X";
+    case "multiple":
+      return "객관식";
+    case "short":
+      return "주관식";
+    case "order":
+      return "순서 나열";
+    default:
+      return String(kind);
+  }
+}
+
+function uniqueTrimmedValues(values: string[] = []) {
+  const trimmed = values.map((value) => value.trim()).filter(Boolean);
+  return new Set(trimmed).size === trimmed.length;
+}
+
+function stableIndex(seed: string, length: number) {
+  if (length <= 0) return 0;
+  let hash = 0;
+
+  for (let index = 0; index < seed.length; index += 1) {
+    hash = (hash * 31 + seed.charCodeAt(index)) >>> 0;
+  }
+
+  return hash % length;
+}
+
 function cleanRuntimeQuestion(question: QuizQuestion): QuizQuestion {
+  const options = question.kind === "short"
+    ? undefined
+    : question.options?.map((option) => option.trim()).filter(Boolean);
+
   return {
     ...question,
     prompt: question.prompt.trim(),
-    options:
-      question.kind === "short"
-        ? undefined
-        : question.options?.map((option) => option.trim()).filter(Boolean),
-    correctAnswers: question.correctAnswers.map((answer) => answer.trim()).filter(Boolean),
+    options,
+    correctAnswers: question.kind === "order" ? (options ?? []) : question.correctAnswers.map((answer) => answer.trim()).filter(Boolean),
     explanation: question.explanation?.trim() || undefined,
     images: (question.images ?? []).slice(0, 4),
+    category: "tiebreaker",
     isTiebreaker: true,
   };
 }
@@ -106,7 +186,17 @@ function validateRuntimeQuestion(question: QuizQuestion): string {
     return "정답을 1개 이상 입력하세요.";
   }
 
-  if (cleaned.kind !== "short") {
+  if (cleaned.kind === "order") {
+    const options = cleaned.options ?? [];
+
+    if (options.length < 3 || options.length > 6) {
+      return "순서 나열 보기는 3~6개 필요합니다.";
+    }
+
+    if (!uniqueTrimmedValues(options)) {
+      return "순서 나열 보기는 중복 없이 입력하세요.";
+    }
+  } else if (cleaned.kind !== "short") {
     const options = cleaned.options ?? [];
 
     if (options.length < 2) {
@@ -134,6 +224,11 @@ function validateQuizDraft(quiz: QuizSet): { index: number; message: string } | 
       if (!question.correctAnswers.every((answer) => options.includes(answer.trim()))) {
         return { index, message: "정답은 보기 중에서 선택하세요." };
       }
+    }
+    if (question.kind === "order") {
+      const options = (question.options ?? []).map((option) => option.trim()).filter(Boolean);
+      if (options.length < 3 || options.length > 6) return { index, message: "순서 나열 보기는 3~6개 필요합니다." };
+      if (!uniqueTrimmedValues(options)) return { index, message: "순서 나열 보기는 중복 없이 입력하세요." };
     }
   }
   return null;
@@ -525,13 +620,15 @@ export function HostConsole({ view = "home", roomCode = "" }: { view?: HostView;
 
   function changeKind(index: number, kind: QuizQuestion["kind"]) {
     const existing = draft.questions[index];
+    const category = questionCategory(existing);
     updateQuestion(index, {
       ...createBlankQuestion(kind),
       id: existing.id,
       prompt: existing.prompt,
       explanation: existing.explanation,
       images: existing.images ?? [],
-      isTiebreaker: existing.isTiebreaker,
+      category,
+      isTiebreaker: category === "tiebreaker",
     });
   }
 
@@ -837,29 +934,35 @@ function ShellCenter({ title, body }: { title: string; body: string }) {
 
 function RoomActionBar({ code, state, busy, onAction }: {
   code: string;
-  state: RoomState | null;
+  state: ExtendedRoomState | null;
   busy: boolean;
   onAction: (action: () => Promise<RoomState>, success: string) => Promise<void>;
 }) {
   const phase = state?.phase ?? "lobby";
-  const eligible = (state?.participants ?? []).filter((participant) => !participant.eliminated);
+  const eligible = (state?.participants ?? []).filter((participant) =>
+    phase === "lobby" ? !participant.eliminated : participant.eligibleForRound,
+  );
   const submitted = new Set((state?.answers ?? []).map((answer) => answer.participantId));
-  const submittedCount = eligible.filter((participant) => submitted.has(participant.id)).length;
-  const action = phase === "lobby"
-    ? { label: "게임 시작", success: "게임을 시작했습니다.", run: () => quizApi.startRoom(code) }
-    : phase === "question"
+  const submittedCount = state?.room?.submittedCount ?? eligible.filter((participant) => submitted.has(participant.id)).length;
+  const activeCount = state?.room?.activeCount ?? (state?.participants ?? []).filter((participant) => !participant.eliminated).length;
+  const action = phase === "question"
       ? { label: "제출 마감", success: "제출을 마감했습니다.", run: () => quizApi.closeQuestion(code) }
       : phase === "closed"
         ? { label: "정답 공개", success: "정답을 공개했습니다.", run: () => quizApi.revealQuestion(code) }
-        : phase === "revealed"
-          ? { label: "다음 단계", success: "다음 단계로 이동했습니다.", run: () => quizApi.nextQuestion(code) }
-          : null;
+        : null;
+  const revealChoice = phase === "revealed" && activeCount <= 1
+    ? activeCount === 1
+      ? "생존자 1명 · 일반 계속, 패자부활, 우승 확정 중 선택하세요"
+      : state?.room?.needsTiebreaker
+        ? "생존자 0명 · 패자부활 또는 동점자 문제를 선택하세요"
+        : "생존자 0명 · 패자부활 또는 마무리를 선택하세요"
+    : "";
 
   return (
     <section className="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 rounded-md border-2 border-zinc-950 bg-[#ffcf4a]/95 p-3 shadow-[0_5px_15px_#0002] backdrop-blur sm:p-4" aria-label="현재 진행 단계">
       <div>
         <p className="text-xs font-black">현재 단계 · {phaseLabel(phase)} · 문제 {questionNumberLabel(state?.currentQuestionIndex)}</p>
-        <p className="mt-1 text-lg font-black">{phase === "lobby" ? `참가자 ${eligible.length}명 대기 중` : `제출 ${submittedCount}/${eligible.length}명`}</p>
+        <p className="mt-1 text-lg font-black">{revealChoice || (phase === "lobby" ? `참가자 ${eligible.length}명 대기 중` : `제출 ${submittedCount}/${eligible.length}명`)}</p>
       </div>
       {action ? (
         <Button
@@ -868,6 +971,13 @@ function RoomActionBar({ code, state, busy, onAction }: {
           onClick={() => void onAction(action.run, action.success)}
         >
           {action.label}
+        </Button>
+      ) : phase === "lobby" || phase === "revealed" ? (
+        <Button
+          className="min-w-36 bg-zinc-950 font-black text-white hover:bg-zinc-800"
+          onClick={() => document.getElementById("question-launch-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+        >
+          다음 문제 선택
         </Button>
       ) : null}
     </section>
@@ -1097,12 +1207,57 @@ function QuizEditor({
   onKind: (index: number, kind: QuizQuestion["kind"]) => void;
   onUpload: (index: number, event: ChangeEvent<HTMLInputElement>) => void;
 }) {
-  function moveQuestion(from: number, to: number) {
-    if (to < 0 || to >= draft.questions.length) return;
-    const questions = [...draft.questions];
-    [questions[from], questions[to]] = [questions[to], questions[from]];
+  const [draggingQuestion, setDraggingQuestion] = useState<{ category: QuestionCategory; index: number } | null>(null);
+
+  function questionItemsFor(category: QuestionCategory) {
+    return draft.questions
+      .map((question, index) => ({ question, index }))
+      .filter((item) => questionCategory(item.question) === category);
+  }
+
+  function questionIndexesFor(category: QuestionCategory) {
+    return questionItemsFor(category).map((item) => item.index);
+  }
+
+  function moveQuestionToCategoryPosition(category: QuestionCategory, index: number, targetPosition: number) {
+    const items = questionItemsFor(category);
+    const categoryPosition = items.findIndex((item) => item.index === index);
+
+    if (categoryPosition < 0 || targetPosition < 0 || targetPosition >= items.length || categoryPosition === targetPosition) {
+      return;
+    }
+
+    const categoryQuestions = items.map((item) => item.question);
+    const [moved] = categoryQuestions.splice(categoryPosition, 1);
+    categoryQuestions.splice(targetPosition, 0, moved);
+
+    const questions = questionCategories.flatMap((item) =>
+      item.value === category
+        ? categoryQuestions
+        : draft.questions.filter((question) => questionCategory(question) === item.value),
+    );
+
     onDraft({ ...draft, questions });
-    onExpanded(to);
+    onExpanded(questions.indexOf(moved));
+  }
+
+  function moveQuestionWithinCategory(category: QuestionCategory, index: number, direction: -1 | 1) {
+    const indexes = questionIndexesFor(category);
+    const categoryPosition = indexes.indexOf(index);
+    moveQuestionToCategoryPosition(category, index, categoryPosition + direction);
+  }
+
+  function addQuestion(category: QuestionCategory) {
+    const question = {
+      ...createBlankQuestion(category === "tiebreaker" ? "short" : "multiple"),
+      category,
+      isTiebreaker: category === "tiebreaker",
+    };
+    onDraft({
+      ...draft,
+      questions: [...draft.questions, question],
+    });
+    onExpanded(draft.questions.length);
   }
 
   return (
@@ -1110,46 +1265,67 @@ function QuizEditor({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-xl font-black">문제 편집</h2>
-          <p className="mt-1 text-sm text-zinc-600">O/X, 객관식, 주관식과 이미지 4장을 지원합니다.</p>
+          <p className="mt-1 text-sm text-zinc-600">일반·패자부활·동점자 문제와 출제 순서를 따로 관리합니다.</p>
         </div>
-        <Button
-          variant="outline"
-          onClick={() => {
-            onDraft({
-              ...draft,
-              questions: [...draft.questions, createBlankQuestion("multiple")],
-            });
-            onExpanded(draft.questions.length);
-          }}
-        >
-          <Plus aria-hidden />
-          문제 추가
-        </Button>
       </div>
 
       <nav aria-label="문제 목록" className="mt-4 flex flex-wrap gap-2">
         {draft.questions.map((question, index) => (
           <button key={question.id ?? index} type="button" onClick={() => { onExpanded(index); document.getElementById(`quiz-question-${index}`)?.scrollIntoView({ behavior: "smooth", block: "start" }); }} className={`rounded-md border px-3 py-2 text-sm font-bold ${expandedIndex === index ? "border-zinc-950 bg-zinc-950 text-white" : "border-zinc-300 bg-white"}`}>
-            {index + 1}. {question.prompt.trim().slice(0, 14) || "새 문제"}
+            {categoryLabel(questionCategory(question)).replace(" 문제", "")} {index + 1}. {question.prompt.trim().slice(0, 14) || "새 문제"}
           </button>
         ))}
       </nav>
 
       <div className="mt-4 space-y-4">
-        {draft.questions.map((question, index) => {
+        {questionCategories.map((category) => {
+          const indexes = questionIndexesFor(category.value);
+          return (
+            <section key={category.value} className="rounded-md border border-zinc-200 bg-[#fbfaf7] p-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-black">{category.label}</h3>
+                  <p className="mt-1 text-xs font-bold text-zinc-500">{category.description} · {indexes.length}개</p>
+                </div>
+                <Button variant="outline" size="sm" onClick={() => addQuestion(category.value)}>
+                  <Plus aria-hidden />
+                  추가
+                </Button>
+              </div>
+              <div className="mt-3 space-y-3">
+                {indexes.length === 0 ? (
+                  <p className="rounded-md border border-dashed border-zinc-300 bg-white p-4 text-sm font-bold text-zinc-500">아직 문제가 없습니다.</p>
+                ) : null}
+                {indexes.map((index, categoryPosition) => {
+          const question = draft.questions[index];
           const validation = validationAttempt ? validateQuizDraft({ ...draft, title: draft.title || "문제", questions: [question] }) : null;
           const error = validation?.index === 0 ? validation.message : "";
           return (
-          <article id={`quiz-question-${index}`} key={question.id ?? index} className={`scroll-mt-24 rounded-md border bg-[#fbfaf7] p-4 ${error ? "border-[#b42318]" : "border-zinc-200"}`}>
+          <article
+            id={`quiz-question-${index}`}
+            key={question.id ?? index}
+            draggable
+            onDragStart={() => setDraggingQuestion({ category: category.value, index })}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={() => {
+              if (draggingQuestion?.category === category.value) {
+                moveQuestionToCategoryPosition(category.value, draggingQuestion.index, categoryPosition);
+              }
+              setDraggingQuestion(null);
+            }}
+            onDragEnd={() => setDraggingQuestion(null)}
+            className={`scroll-mt-24 rounded-md border bg-[#fbfaf7] p-4 ${error ? "border-[#b42318]" : "border-zinc-200"} ${draggingQuestion?.index === index ? "opacity-60" : ""}`}
+          >
             <div className="flex flex-wrap items-center justify-between gap-3">
               <button type="button" className="flex min-w-0 items-center gap-2 text-left font-black" aria-expanded={expandedIndex === index} onClick={() => onExpanded(expandedIndex === index ? null : index)}>
+                <GripVertical aria-hidden className="size-4 shrink-0 text-zinc-400" />
                 {expandedIndex === index ? <ChevronUp aria-hidden className="size-4 shrink-0" /> : <ChevronDown aria-hidden className="size-4 shrink-0" />}
-                <span className="truncate">문제 {index + 1} · {question.prompt.trim().slice(0, 36) || "내용 없음"}</span>
+                <span className="truncate">{category.label} {categoryPosition + 1} · {questionKindLabel(question.kind)} · {question.prompt.trim().slice(0, 36) || "내용 없음"}</span>
               </button>
               <div className="flex flex-wrap gap-2">
-                <Button size="icon-sm" variant="outline" aria-label={`문제 ${index + 1} 위로 이동`} disabled={index === 0} onClick={() => moveQuestion(index, index - 1)}><ChevronUp aria-hidden /></Button>
-                <Button size="icon-sm" variant="outline" aria-label={`문제 ${index + 1} 아래로 이동`} disabled={index === draft.questions.length - 1} onClick={() => moveQuestion(index, index + 1)}><ChevronDown aria-hidden /></Button>
-                {expandedIndex === index ? (["ox", "multiple", "short"] as const).map((kind) => (
+                <Button size="icon-sm" variant="outline" aria-label={`${category.label} ${categoryPosition + 1} 위로 이동`} disabled={categoryPosition === 0} onClick={() => moveQuestionWithinCategory(category.value, index, -1)}><ChevronUp aria-hidden /></Button>
+                <Button size="icon-sm" variant="outline" aria-label={`${category.label} ${categoryPosition + 1} 아래로 이동`} disabled={categoryPosition === indexes.length - 1} onClick={() => moveQuestionWithinCategory(category.value, index, 1)}><ChevronDown aria-hidden /></Button>
+                {expandedIndex === index ? (["ox", "multiple", "short", "order"] as const).map((kind) => (
                   <Button
                     key={kind}
                     size="sm"
@@ -1157,7 +1333,7 @@ function QuizEditor({
                     onClick={() => onKind(index, kind)}
                     className={question.kind === kind ? "bg-zinc-950 text-white" : ""}
                   >
-                    {kind === "ox" ? "O/X" : kind === "multiple" ? "객관식" : "주관식"}
+                    {questionKindLabel(kind)}
                   </Button>
                 )) : null}
                 <Button
@@ -1188,35 +1364,135 @@ function QuizEditor({
               className="mt-3 w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-lg font-bold"
             />
 
-            {question.kind !== "short" ? (
-              <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                {(question.options ?? []).map((option, optionIndex) => (
-                  <label key={optionIndex} className="flex items-center gap-2 rounded-md bg-white p-2">
-                    <input
-                      type="radio"
-                      name={`correct-${index}`}
-                      checked={question.correctAnswers.includes(option)}
-                      onChange={() => onQuestion(index, { correctAnswers: [option] })}
-                    />
-                    <input
-                      value={option}
-                      disabled={question.kind === "ox"}
-                      onChange={(event) => {
-                        const nextOptions = [...(question.options ?? [])];
-                        const previous = nextOptions[optionIndex];
-                        nextOptions[optionIndex] = event.target.value;
-                        onQuestion(index, {
-                          options: nextOptions,
-                          correctAnswers: question.correctAnswers.includes(previous)
-                            ? [event.target.value]
-                            : question.correctAnswers,
-                        });
-                      }}
-                      placeholder={`보기 ${optionIndex + 1}`}
-                      className="h-10 min-w-0 flex-1 rounded-md border border-zinc-200 px-3"
-                    />
-                  </label>
+            <label className="mt-3 block text-sm font-bold">
+              문제 묶음
+              <select
+                value={questionCategory(question)}
+                onChange={(event) => {
+                  const nextCategory = event.target.value as QuestionCategory;
+                  onQuestion(index, {
+                    category: nextCategory,
+                    isTiebreaker: nextCategory === "tiebreaker",
+                  });
+                }}
+                className="mt-2 h-10 w-full rounded-md border border-zinc-300 bg-white px-3"
+              >
+                {questionCategories.map((item) => (
+                  <option key={item.value} value={item.value}>{item.label}</option>
                 ))}
+              </select>
+            </label>
+
+            {question.kind !== "short" ? (
+              <div className="mt-3">
+                {question.kind === "order" ? (
+                  <div>
+                    <p className="text-sm font-bold text-zinc-600">참가자가 맞춰야 하는 정답 순서대로 3~6개를 입력하세요.</p>
+                    <div className="mt-2 grid gap-2">
+                      {(question.options ?? []).map((option, optionIndex) => (
+                        <div key={optionIndex} className="flex items-center gap-2 rounded-md bg-white p-2">
+                          <GripVertical aria-hidden className="size-4 shrink-0 text-zinc-400" />
+                          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-[#ffcf4a] text-sm font-black">{optionIndex + 1}</span>
+                          <input
+                            value={option}
+                            onChange={(event) => {
+                              const nextOptions = [...(question.options ?? [])];
+                              nextOptions[optionIndex] = event.target.value;
+                              onQuestion(index, {
+                                options: nextOptions,
+                                correctAnswers: nextOptions,
+                              });
+                            }}
+                            placeholder={`순서 ${optionIndex + 1}`}
+                            className="h-10 min-w-0 flex-1 rounded-md border border-zinc-200 px-3"
+                          />
+                          <Button
+                            size="icon-sm"
+                            variant="outline"
+                            aria-label={`순서 ${optionIndex + 1} 위로 이동`}
+                            disabled={optionIndex === 0}
+                            onClick={() => {
+                              const nextOptions = [...(question.options ?? [])];
+                              [nextOptions[optionIndex - 1], nextOptions[optionIndex]] = [nextOptions[optionIndex], nextOptions[optionIndex - 1]];
+                              onQuestion(index, { options: nextOptions, correctAnswers: nextOptions });
+                            }}
+                          >
+                            <ChevronUp aria-hidden />
+                          </Button>
+                          <Button
+                            size="icon-sm"
+                            variant="outline"
+                            aria-label={`순서 ${optionIndex + 1} 아래로 이동`}
+                            disabled={optionIndex === (question.options?.length ?? 0) - 1}
+                            onClick={() => {
+                              const nextOptions = [...(question.options ?? [])];
+                              [nextOptions[optionIndex], nextOptions[optionIndex + 1]] = [nextOptions[optionIndex + 1], nextOptions[optionIndex]];
+                              onQuestion(index, { options: nextOptions, correctAnswers: nextOptions });
+                            }}
+                          >
+                            <ChevronDown aria-hidden />
+                          </Button>
+                          <Button
+                            size="icon-sm"
+                            variant="outline"
+                            aria-label={`순서 ${optionIndex + 1} 삭제`}
+                            disabled={(question.options?.length ?? 0) <= 3}
+                            onClick={() => {
+                              const nextOptions = (question.options ?? []).filter((_, itemIndex) => itemIndex !== optionIndex);
+                              onQuestion(index, { options: nextOptions, correctAnswers: nextOptions });
+                            }}
+                          >
+                            <Trash2 aria-hidden />
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="mt-2"
+                      disabled={(question.options?.length ?? 0) >= 6}
+                      onClick={() => {
+                        const nextOptions = [...(question.options ?? []), ""];
+                        onQuestion(index, { options: nextOptions, correctAnswers: nextOptions });
+                      }}
+                    >
+                      <Plus aria-hidden />
+                      순서 추가
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {(question.options ?? []).map((option, optionIndex) => (
+                      <label key={optionIndex} className="flex items-center gap-2 rounded-md bg-white p-2">
+                        <input
+                          type="radio"
+                          name={`correct-${index}`}
+                          checked={question.correctAnswers.includes(option)}
+                          onChange={() => onQuestion(index, { correctAnswers: [option] })}
+                        />
+                        <input
+                          value={option}
+                          disabled={question.kind === "ox"}
+                          onChange={(event) => {
+                            const nextOptions = [...(question.options ?? [])];
+                            const previous = nextOptions[optionIndex];
+                            nextOptions[optionIndex] = event.target.value;
+                            onQuestion(index, {
+                              options: nextOptions,
+                              correctAnswers: question.correctAnswers.includes(previous)
+                                ? [event.target.value]
+                                : question.correctAnswers,
+                            });
+                          }}
+                          placeholder={`보기 ${optionIndex + 1}`}
+                          className="h-10 min-w-0 flex-1 rounded-md border border-zinc-200 px-3"
+                        />
+                      </label>
+                    ))}
+                  </div>
+                )}
               </div>
             ) : (
               <input
@@ -1255,14 +1531,6 @@ function QuizEditor({
                   onChange={(event) => onUpload(index, event)}
                 />
               </label>
-              <label className="inline-flex items-center gap-2 text-sm font-bold">
-                <input
-                  type="checkbox"
-                  checked={Boolean(question.isTiebreaker)}
-                  onChange={(event) => onQuestion(index, { isTiebreaker: event.target.checked })}
-                />
-                타이브레이커
-              </label>
               <span className="text-sm text-zinc-500">{question.images?.length ?? 0} / 4장</span>
             </div>
 
@@ -1291,6 +1559,10 @@ function QuizEditor({
             </div> : null}
           </article>
         );})}
+              </div>
+            </section>
+          );
+        })}
       </div>
     </section>
   );
@@ -1311,16 +1583,65 @@ function LiveControl({
 }) {
   const [tiebreakQuestion, setTiebreakQuestion] = useState<QuizQuestion>(() => ({
     ...createBlankQuestion("short"),
+    category: "tiebreaker",
     isTiebreaker: true,
   }));
   const [tiebreakNotice, setTiebreakNotice] = useState("");
   const [uploadingTiebreakImages, setUploadingTiebreakImages] = useState(false);
+  const [launchCategory, setLaunchCategory] = useState<QuestionCategory>("regular");
+  const [launchMode, setLaunchMode] = useState<"random" | "sequential">("random");
+  const [selectedQuestionId, setSelectedQuestionId] = useState("");
+  const initializedModeRoom = useRef("");
   const question = state?.currentQuestion ?? null;
   const answers = state?.answers ?? [];
   const participants = state?.participants ?? [];
   const ranking = state?.ranking ?? participants;
   const submittedIds = new Set(answers.map((answer) => answer.participantId));
   const tiebreakError = validateRuntimeQuestion(tiebreakQuestion);
+  const extendedState = state as ExtendedRoomState | null;
+  useEffect(() => {
+    if (code && extendedState?.room && initializedModeRoom.current !== code) {
+      initializedModeRoom.current = code;
+      setLaunchMode(extendedState.room.playMode ?? "random");
+    }
+  }, [code, extendedState?.room]);
+  const activeCount = extendedState?.room?.activeCount ?? aliveCount(participants);
+  const eliminatedCount = participants.filter((participant) => participant.eliminated).length;
+  const availablePools = extendedState?.availableQuestions;
+  const availableQuestions = useMemo(
+    () => availablePools
+      ? (availablePools[launchCategory] ?? [])
+      : (state?.quiz?.questions?.filter((item) => questionCategory(item) === launchCategory) ?? []),
+    [availablePools, launchCategory, state?.quiz?.questions],
+  );
+  const availableQuestionKey = availableQuestions.map((item) => item.id ?? item.prompt).join("|");
+  const selectedQuestion = availableQuestions.find((item) => (item.id ?? item.prompt) === selectedQuestionId) ?? null;
+  const autoPreviewQuestionId = useMemo(() => {
+    if (selectedQuestion || availableQuestions.length === 0) return "";
+    const ids = availableQuestions.map((item) => item.id ?? item.prompt);
+    if (launchMode === "sequential") return ids[0] ?? "";
+    const seed = `${state?.code ?? code}:${state?.phase ?? "unknown"}:${launchCategory}:${availableQuestionKey}`;
+    return ids[stableIndex(seed, ids.length)] ?? "";
+  }, [availableQuestionKey, availableQuestions, code, launchCategory, launchMode, selectedQuestion, state?.code, state?.phase]);
+  const autoPreviewQuestion = availableQuestions.find((item) => (item.id ?? item.prompt) === autoPreviewQuestionId) ?? null;
+  const previewQuestion = selectedQuestion ?? autoPreviewQuestion ?? availableQuestions[0] ?? null;
+  const previewQuestionId = previewQuestion?.id ?? "";
+  const canPickNext = state?.phase === "lobby" || state?.phase === "revealed";
+  const lobbyCategoryBlocked = state?.phase === "lobby" && launchCategory !== "regular";
+  const regularBlocked = state?.phase === "revealed" && activeCount === 0;
+  const revivalBlocked = state?.phase !== "revealed" || eliminatedCount === 0;
+  const tiebreakerBlocked = state?.phase !== "revealed" || activeCount === 1 ||
+    (activeCount === 0 && !extendedState?.room?.needsTiebreaker);
+  const finishAvailable = state?.phase === "revealed" && activeCount <= 1;
+  const launchBlocked =
+    !code ||
+    busy ||
+    !canPickNext ||
+    lobbyCategoryBlocked ||
+    (launchCategory === "regular" && regularBlocked) ||
+    (launchCategory === "revival" && revivalBlocked) ||
+    (launchCategory === "tiebreaker" && tiebreakerBlocked) ||
+    !previewQuestion;
 
   function updateTiebreakQuestion(patch: Partial<QuizQuestion>) {
     setTiebreakQuestion((current) => ({ ...current, ...patch, isTiebreaker: true }));
@@ -1331,8 +1652,39 @@ function LiveControl({
       ...createBlankQuestion(kind),
       prompt: current.prompt,
       explanation: current.explanation,
+      category: "tiebreaker",
       isTiebreaker: true,
     }));
+  }
+
+  function launchLabel() {
+    if (state?.phase === "lobby") return "선택한 문제로 시작";
+    if (launchCategory === "revival") return "패자부활전 열기";
+    if (launchCategory === "tiebreaker") return "동점자 문제 시작";
+    return "다음 일반 문제 시작";
+  }
+
+  function launchQuestion() {
+    if (state?.phase === "lobby") {
+      return quizApi.startRoom(code, {
+        category: launchCategory,
+        playMode: launchMode,
+        questionId: previewQuestionId,
+      });
+    }
+
+    if (launchCategory === "revival") {
+      return quizApi.startRevival(code, {
+        playMode: launchMode,
+        questionId: previewQuestionId,
+      });
+    }
+
+    return quizApi.nextQuestion(code, {
+      category: launchCategory,
+      playMode: launchMode,
+      questionId: previewQuestionId,
+    });
   }
 
   async function uploadTiebreakImages(event: ChangeEvent<HTMLInputElement>) {
@@ -1387,6 +1739,139 @@ function LiveControl({
             동기화
           </Button>
         </div>
+
+        {canPickNext ? (
+          <div id="question-launch-panel" className="mt-5 scroll-mt-28 rounded-md border border-zinc-200 bg-[#fff9e8] p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="font-black">다음 출제 선택</h3>
+                <p className="mt-1 text-sm text-zinc-600">무작위가 기본이며, 특정 미사용 문제를 고르면 진행자만 먼저 확인합니다.</p>
+              </div>
+              {finishAvailable ? (
+                <Button
+                  variant="outline"
+                  disabled={!code || busy}
+                  onClick={() => {
+                    if (extendedState?.room?.needsTiebreaker) {
+                      setLaunchCategory("tiebreaker");
+                      setSelectedQuestionId("");
+                      document.getElementById("question-launch-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+                    } else {
+                      void onAction(() => quizApi.finishRoom(code), "게임을 마무리했습니다.");
+                    }
+                  }}
+                >
+                  {extendedState?.room?.needsTiebreaker ? "동점자 문제 선택" : "우승 확정/마무리"}
+                </Button>
+              ) : null}
+            </div>
+
+            <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(220px,320px)]">
+              <div>
+                <div className="flex flex-wrap gap-2">
+                  {questionCategories.map((category) => {
+                    const disabled =
+                      (state?.phase === "lobby" && category.value !== "regular") ||
+                      (category.value === "regular" && regularBlocked) ||
+                      (category.value === "revival" && revivalBlocked) ||
+                      (category.value === "tiebreaker" && tiebreakerBlocked);
+                    return (
+                      <Button
+                        key={category.value}
+                        type="button"
+                        size="sm"
+                        variant={launchCategory === category.value ? "default" : "outline"}
+                        disabled={disabled}
+                        onClick={() => {
+                          setLaunchCategory(category.value);
+                          setSelectedQuestionId("");
+                        }}
+                        className={launchCategory === category.value ? "bg-zinc-950 text-white" : "bg-white"}
+                      >
+                        {category.label}
+                      </Button>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <label className="block text-sm font-bold">
+                    출제 방식
+                    <select
+                      value={launchMode}
+                      onChange={(event) => {
+                        setLaunchMode(event.target.value as "random" | "sequential");
+                        setSelectedQuestionId("");
+                      }}
+                      className="mt-2 h-10 w-full rounded-md border border-zinc-300 bg-white px-3"
+                    >
+                      <option value="random">무작위</option>
+                      <option value="sequential">순차</option>
+                    </select>
+                  </label>
+
+                  <label className="block text-sm font-bold">
+                    특정 문제 선택
+                    <select
+                      value={selectedQuestionId}
+                      onChange={(event) => setSelectedQuestionId(event.target.value)}
+                      className="mt-2 h-10 w-full rounded-md border border-zinc-300 bg-white px-3"
+                    >
+                      <option value="">자동 선택</option>
+                      {availableQuestions.map((item, index) => (
+                        <option key={item.id ?? `${launchCategory}-${index}`} value={item.id ?? item.prompt}>
+                          {index + 1}. {item.prompt.trim() || "내용 없음"}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <Button
+                  className="mt-3 bg-zinc-950 font-black text-white"
+                  disabled={launchBlocked}
+                  onClick={() => void onAction(launchQuestion, `${launchLabel()} 완료`)}
+                >
+                  {launchLabel()}
+                </Button>
+                {launchCategory === "regular" && regularBlocked ? (
+                  <p className="mt-2 text-sm font-bold text-[#b42318]">생존자가 0명이면 일반 문제를 더 낼 수 없습니다.</p>
+                ) : null}
+                {launchCategory === "revival" && revivalBlocked ? (
+                  <p className="mt-2 text-sm font-bold text-[#8a6100]">패자부활전은 정답 공개 후 탈락자가 있을 때 열 수 있습니다.</p>
+                ) : null}
+              </div>
+
+              <div className="rounded-md border border-zinc-200 bg-white p-3">
+                <p className="text-xs font-black text-zinc-500">진행자 미리보기</p>
+                {previewQuestion ? (
+                  <div className="mt-2">
+                    <p className="text-sm font-black">{selectedQuestion ? "직접 선택" : launchMode === "random" ? "무작위 후보" : "순차 후보"} · {questionKindLabel(previewQuestion.kind)} · {categoryLabel(questionCategory(previewQuestion))}</p>
+                    <p className="mt-2 text-lg font-black leading-snug">{previewQuestion.prompt || "내용 없음"}</p>
+                    {previewQuestion.options?.length ? (
+                      <div className="mt-2 space-y-1">
+                        {previewQuestion.options.map((option, index) => (
+                          <p key={`${option}-${index}`} className="rounded-md bg-[#f7f2e8] px-2 py-1 text-sm font-bold">{index + 1}. {option || "빈 보기"}</p>
+                        ))}
+                      </div>
+                    ) : null}
+                    {previewQuestion.images?.length ? (
+                      <div className="mt-2 grid grid-cols-2 gap-2">
+                        {previewQuestion.images.slice(0, 4).map((image) => (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img key={image} src={image} alt="문제 미리보기" className="aspect-video w-full rounded-md object-cover" />
+                        ))}
+                      </div>
+                    ) : null}
+                    <p className="mt-3 text-sm font-bold">정답: {previewQuestion.correctAnswers.join(previewQuestion.kind === "order" ? " → " : ", ")}</p>
+                  </div>
+                ) : (
+                  <p className="mt-2 text-sm text-zinc-500">특정 문제를 고르면 이곳에서 먼저 확인합니다.</p>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         <div className="mt-5 rounded-md bg-[#f7f2e8] p-4">
           <p className="text-sm font-bold text-zinc-500">
@@ -1474,7 +1959,7 @@ function LiveControl({
       <div className="rounded-md border-2 border-zinc-950 bg-white p-4">
         <h2 className="text-xl font-black">타이브레이커</h2>
         <div className="mt-3 flex flex-wrap gap-2">
-          {(["ox", "multiple", "short"] as const).map((kind) => (
+          {(["ox", "multiple", "short", "order"] as const).map((kind) => (
             <Button
               key={kind}
               type="button"
@@ -1483,7 +1968,7 @@ function LiveControl({
               onClick={() => changeTiebreakKind(kind)}
               className={tiebreakQuestion.kind === kind ? "bg-zinc-950 text-white" : ""}
             >
-              {kind === "ox" ? "O/X" : kind === "multiple" ? "객관식" : "주관식"}
+              {questionKindLabel(kind)}
             </Button>
           ))}
         </div>
@@ -1495,7 +1980,77 @@ function LiveControl({
           className="mt-3 w-full rounded-md border border-zinc-300 px-3 py-2"
         />
 
-        {tiebreakQuestion.kind !== "short" ? (
+        {tiebreakQuestion.kind === "order" ? (
+          <div className="mt-3 space-y-2">
+            <p className="text-sm font-bold text-zinc-600">정답 순서대로 3~6개를 입력하세요.</p>
+            {(tiebreakQuestion.options ?? []).map((option, optionIndex) => (
+              <div key={optionIndex} className="flex items-center gap-2 rounded-md bg-[#f7f2e8] p-2">
+                <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-[#ffcf4a] text-sm font-black">{optionIndex + 1}</span>
+                <input
+                  value={option}
+                  onChange={(event) => {
+                    const nextOptions = [...(tiebreakQuestion.options ?? [])];
+                    nextOptions[optionIndex] = event.target.value;
+                    updateTiebreakQuestion({ options: nextOptions, correctAnswers: nextOptions });
+                  }}
+                  placeholder={`순서 ${optionIndex + 1}`}
+                  className="h-10 min-w-0 flex-1 rounded-md border border-zinc-300 bg-white px-3"
+                />
+                <Button
+                  size="icon-sm"
+                  variant="outline"
+                  aria-label={`순서 ${optionIndex + 1} 위로 이동`}
+                  disabled={optionIndex === 0}
+                  onClick={() => {
+                    const nextOptions = [...(tiebreakQuestion.options ?? [])];
+                    [nextOptions[optionIndex - 1], nextOptions[optionIndex]] = [nextOptions[optionIndex], nextOptions[optionIndex - 1]];
+                    updateTiebreakQuestion({ options: nextOptions, correctAnswers: nextOptions });
+                  }}
+                >
+                  <ChevronUp aria-hidden />
+                </Button>
+                <Button
+                  size="icon-sm"
+                  variant="outline"
+                  aria-label={`순서 ${optionIndex + 1} 아래로 이동`}
+                  disabled={optionIndex === (tiebreakQuestion.options?.length ?? 0) - 1}
+                  onClick={() => {
+                    const nextOptions = [...(tiebreakQuestion.options ?? [])];
+                    [nextOptions[optionIndex], nextOptions[optionIndex + 1]] = [nextOptions[optionIndex + 1], nextOptions[optionIndex]];
+                    updateTiebreakQuestion({ options: nextOptions, correctAnswers: nextOptions });
+                  }}
+                >
+                  <ChevronDown aria-hidden />
+                </Button>
+                <Button
+                  size="icon-sm"
+                  variant="outline"
+                  aria-label={`순서 ${optionIndex + 1} 삭제`}
+                  disabled={(tiebreakQuestion.options?.length ?? 0) <= 3}
+                  onClick={() => {
+                    const nextOptions = (tiebreakQuestion.options ?? []).filter((_, itemIndex) => itemIndex !== optionIndex);
+                    updateTiebreakQuestion({ options: nextOptions, correctAnswers: nextOptions });
+                  }}
+                >
+                  <Trash2 aria-hidden />
+                </Button>
+              </div>
+            ))}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={(tiebreakQuestion.options?.length ?? 0) >= 6}
+              onClick={() => {
+                const nextOptions = [...(tiebreakQuestion.options ?? []), ""];
+                updateTiebreakQuestion({ options: nextOptions, correctAnswers: nextOptions });
+              }}
+            >
+              <Plus aria-hidden />
+              순서 추가
+            </Button>
+          </div>
+        ) : tiebreakQuestion.kind !== "short" ? (
           <div className="mt-3 grid gap-2">
             {(tiebreakQuestion.options ?? []).map((option, optionIndex) => (
               <label key={optionIndex} className="flex items-center gap-2 rounded-md bg-[#f7f2e8] p-2">
@@ -1599,7 +2154,7 @@ function LiveControl({
         ) : null}
         <Button
           className="mt-3 w-full bg-zinc-950 font-black text-white"
-          disabled={!code || busy || uploadingTiebreakImages || Boolean(tiebreakError)}
+          disabled={!code || busy || uploadingTiebreakImages || Boolean(tiebreakError) || tiebreakerBlocked}
           onClick={() =>
             void onAction(
               () =>
@@ -1636,13 +2191,20 @@ function cleanQuiz(quiz: QuizSet): QuizSet {
   return {
     ...quiz,
     title: quiz.title.trim() || "제목 없는 문제 세트",
-    questions: quiz.questions.map((question) => ({
-      ...question,
-      prompt: question.prompt.trim(),
-      options: question.kind === "short" ? undefined : question.options?.map((option) => option.trim()).filter(Boolean),
-      correctAnswers: question.correctAnswers.map((answer) => answer.trim()).filter(Boolean),
-      explanation: question.explanation?.trim() || undefined,
-      images: (question.images ?? []).slice(0, 4),
-    })),
+    questions: quiz.questions.map((question) => {
+      const category = questionCategory(question);
+      const options = question.kind === "short" ? undefined : question.options?.map((option) => option.trim()).filter(Boolean);
+
+      return {
+        ...question,
+        prompt: question.prompt.trim(),
+        options,
+        correctAnswers: question.kind === "order" ? (options ?? []) : question.correctAnswers.map((answer) => answer.trim()).filter(Boolean),
+        explanation: question.explanation?.trim() || undefined,
+        images: (question.images ?? []).slice(0, 4),
+        category,
+        isTiebreaker: category === "tiebreaker",
+      };
+    }),
   };
 }

@@ -1,6 +1,13 @@
 "use client";
 
-export type QuestionKind = "ox" | "multiple" | "short";
+export type QuestionKind = "ox" | "multiple" | "short" | "order";
+export type QuestionCategory = "regular" | "revival" | "tiebreaker";
+export type PlayMode = "random" | "sequential";
+export type QuestionLaunchRequest = {
+  category: QuestionCategory;
+  playMode: PlayMode;
+  questionId?: string;
+};
 export type RoomPhase =
   | "lobby"
   | "question"
@@ -17,6 +24,7 @@ export type QuizQuestion = {
   correctAnswers: string[];
   explanation?: string;
   images?: string[];
+  category?: QuestionCategory;
   isTiebreaker?: boolean;
 };
 
@@ -49,6 +57,8 @@ export type Participant = {
   correctCount?: number;
   eliminated?: boolean;
   active?: boolean;
+  eligibleForRound?: boolean;
+  canSubmit?: boolean;
   joinedAt?: string;
 };
 
@@ -74,12 +84,20 @@ export type RoomState = {
     joinLocked?: boolean;
     currentQuestionIndex?: number;
     submittedCount?: number;
+    acceptingAnswers?: boolean;
+    activeCount?: number;
+    currentPool?: QuestionCategory;
+    playMode?: PlayMode;
+    needsTiebreaker?: boolean;
   };
   quiz?: QuizSet;
   participants?: Participant[];
   me?: Participant | null;
   currentQuestion?: QuizQuestion | null;
   currentQuestionIndex?: number;
+  availableQuestions?: Partial<Record<QuestionCategory, QuizQuestion[]>>;
+  eligibleForRound?: boolean;
+  canSubmit?: boolean;
   answers?: AnswerRecord[];
   ranking?: RankingRow[];
   myAnswer?: AnswerRecord | null;
@@ -237,8 +255,11 @@ export const quizApi = {
       },
     );
   },
-  startRoom(code: string) {
-    return apiFetch<RoomState>(`/api/rooms/${code}/start`, { method: "POST" });
+  startRoom(code: string, request?: QuestionLaunchRequest) {
+    return apiFetch<RoomState>(`/api/rooms/${code}/start`, {
+      method: "POST",
+      body: JSON.stringify(request ?? {}),
+    });
   },
   submitAnswer(code: string, answer: string | string[], playerToken: string) {
     return apiFetch<RoomState>(`/api/rooms/${code}/answer`, {
@@ -259,8 +280,20 @@ export const quizApi = {
   revealQuestion(code: string) {
     return apiFetch<RoomState>(`/api/rooms/${code}/reveal`, { method: "POST" });
   },
-  nextQuestion(code: string) {
-    return apiFetch<RoomState>(`/api/rooms/${code}/next`, { method: "POST" });
+  nextQuestion(code: string, request?: QuestionLaunchRequest) {
+    return apiFetch<RoomState>(`/api/rooms/${code}/next`, {
+      method: "POST",
+      body: JSON.stringify(request ?? {}),
+    });
+  },
+  startRevival(code: string, request: Omit<QuestionLaunchRequest, "category">) {
+    return apiFetch<RoomState>(`/api/rooms/${code}/revival`, {
+      method: "POST",
+      body: JSON.stringify(request),
+    });
+  },
+  finishRoom(code: string) {
+    return apiFetch<RoomState>(`/api/rooms/${code}/finish`, { method: "POST" });
   },
   createTiebreaker(code: string, question: QuizQuestion) {
     return apiFetch<RoomState>(`/api/rooms/${code}/tiebreaker`, {
@@ -302,6 +335,16 @@ export function createBlankQuestion(kind: QuestionKind = "multiple"): QuizQuesti
       kind,
       prompt: "",
       correctAnswers: [""],
+      images: [],
+    };
+  }
+
+  if (kind === "order") {
+    return {
+      kind,
+      prompt: "",
+      options: ["", "", ""],
+      correctAnswers: ["", "", ""],
       images: [],
     };
   }

@@ -1,4 +1,5 @@
-export type QuestionKind = "ox" | "multiple" | "short";
+export type QuestionKind = "ox" | "multiple" | "short" | "order";
+export type QuestionCategory = "regular" | "revival" | "tiebreaker";
 
 export type Question = {
   id?: string;
@@ -8,6 +9,7 @@ export type Question = {
   correctAnswers: string[];
   explanation?: string;
   images?: string[];
+  category?: QuestionCategory;
   isTiebreaker?: boolean;
 };
 

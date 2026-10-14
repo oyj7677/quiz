@@ -2,12 +2,11 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { ArrowLeft, Check, Loader2, Send, Trophy } from "lucide-react";
+import { ArrowLeft, Check, Loader2, RotateCcw, Send, Trophy, Undo2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   ApiError,
   phaseLabel,
-  questionNumberLabel,
   quizApi,
   QuizQuestion,
   RoomState,
@@ -30,12 +29,163 @@ function tokenKey(code: string) {
   return `gb-player-${code}`;
 }
 
+type AnswerDraft = string | string[];
+type RoundKind = "normal" | "revival" | "tiebreaker" | string;
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
 function answerToText(answer: string | string[] | undefined) {
   if (Array.isArray(answer)) {
-    return answer.join(", ");
+    return answer.join(" → ");
   }
 
   return answer ?? "";
+}
+
+function answerReady(question: QuizQuestion | null, answer: AnswerDraft) {
+  if (!question) {
+    return false;
+  }
+
+  if (isOrderingQuestion(question)) {
+    return Array.isArray(answer) && answer.length === (question.options ?? []).length;
+  }
+
+  return typeof answer === "string" && Boolean(answer.trim());
+}
+
+function getBooleanField(value: unknown, keys: string[]) {
+  const record = asRecord(value);
+  for (const key of keys) {
+    if (typeof record[key] === "boolean") {
+      return record[key] as boolean;
+    }
+  }
+
+  return null;
+}
+
+function getStringField(value: unknown, keys: string[]) {
+  const record = asRecord(value);
+  for (const key of keys) {
+    if (typeof record[key] === "string" && record[key]) {
+      return record[key] as string;
+    }
+  }
+
+  return "";
+}
+
+function getStringArrayField(value: unknown, keys: string[]) {
+  const record = asRecord(value);
+  for (const key of keys) {
+    if (Array.isArray(record[key]) && record[key].every((item) => typeof item === "string")) {
+      return record[key] as string[];
+    }
+  }
+
+  return [];
+}
+
+function roundKindFrom(state: RoomState | null, question: QuizQuestion | null): RoundKind {
+  const room = asRecord(state?.room);
+  const stateKind = getStringField(state, ["roundKind", "roundType", "questionCategory", "currentQuestionCategory"]);
+  const roomKind = getStringField(room, ["roundKind", "roundType", "questionCategory", "currentQuestionCategory"]);
+  const questionKind = getStringField(question, ["roundKind", "roundType", "category", "questionCategory"]);
+  const rawKind = stateKind || roomKind || questionKind || "normal";
+  const normalizedKind = rawKind.toLocaleLowerCase("ko-KR");
+
+  if (question?.isTiebreaker || normalizedKind.includes("tie") || normalizedKind.includes("동점")) {
+    return "tiebreaker";
+  }
+
+  if (normalizedKind.includes("revival") || normalizedKind.includes("rescue") || normalizedKind.includes("부활")) {
+    return "revival";
+  }
+
+  return rawKind;
+}
+
+function roundLabel(kind: RoundKind, question: QuizQuestion | null) {
+  if (kind === "revival") {
+    return "패자부활전";
+  }
+
+  if (kind === "tiebreaker" || question?.isTiebreaker) {
+    return "동점자 문제";
+  }
+
+  return "일반 문제";
+}
+
+function isOrderingQuestion(question: QuizQuestion | null) {
+  return question?.kind === "order";
+}
+
+function questionKindLabel(question: QuizQuestion) {
+  if (isOrderingQuestion(question)) {
+    return "순서 나열";
+  }
+
+  if (question.kind === "ox") {
+    return "O/X";
+  }
+
+  if (question.kind === "multiple") {
+    return "객관식";
+  }
+
+  return "주관식";
+}
+
+function canSubmitForCurrentRound(state: RoomState | null, roundKind: RoundKind) {
+  if (!state?.me || !state.currentQuestion || state.phase !== "question") {
+    return false;
+  }
+
+  const acceptingAnswers = getBooleanField(state.room, ["acceptingAnswers"]);
+  if (acceptingAnswers === false) {
+    return false;
+  }
+
+  const explicitCanSubmit = getBooleanField(state, ["canSubmit", "myCanSubmit"]) ?? getBooleanField(state.me, ["canSubmit"]);
+  if (explicitCanSubmit !== null) {
+    return explicitCanSubmit;
+  }
+
+  const eligibleIds = [
+    ...getStringArrayField(state, ["eligibleParticipantIds", "currentEligibleParticipantIds", "answerableParticipantIds"]),
+    ...getStringArrayField(state.room, ["eligibleParticipantIds", "currentEligibleParticipantIds", "answerableParticipantIds"]),
+  ];
+  if (eligibleIds.length) {
+    return eligibleIds.includes(state.me.id);
+  }
+
+  if (roundKind === "revival") {
+    return Boolean(state.me.eliminated);
+  }
+
+  return !state.me.eliminated;
+}
+
+function isCurrentRoundParticipant(state: RoomState | null, roundKind: RoundKind) {
+  if (!state?.me || !state.currentQuestion) {
+    return false;
+  }
+
+  const explicitEligibility = getBooleanField(state, ["eligibleForRound"]) ??
+    getBooleanField(state.me, ["eligibleForRound"]);
+  if (explicitEligibility !== null) {
+    return explicitEligibility;
+  }
+
+  if (state.myAnswer) {
+    return true;
+  }
+
+  return roundKind === "revival" ? Boolean(state.me.eliminated) : !state.me.eliminated;
 }
 
 export function PlayerApp() {
@@ -44,19 +194,22 @@ export function PlayerApp() {
   const [nickname, setNickname] = useState("");
   const [token, setToken] = useState<string | null>(null);
   const [state, setState] = useState<RoomState | null>(null);
-  const [answer, setAnswer] = useState("");
-  const [answerQuestionIndex, setAnswerQuestionIndex] = useState(-1);
+  const [answer, setAnswer] = useState<AnswerDraft>("");
+  const [answerQuestionKey, setAnswerQuestionKey] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
 
   const question = state?.currentQuestion ?? null;
   const currentQuestionIndex = state?.currentQuestionIndex ?? -1;
+  const currentQuestionKey = `${currentQuestionIndex}:${question?.id ?? ""}:${question?.kind ?? ""}`;
   const phase = state?.phase ?? "lobby";
   const me = state?.me ?? null;
-  const isEliminated = Boolean(me?.eliminated);
+  const roundKind = roundKindFrom(state, question);
+  const canSubmit = canSubmitForCurrentRound(state, roundKind);
+  const isRoundParticipant = isCurrentRoundParticipant(state, roundKind);
   const isClosed = phase === "closed" || phase === "revealed" || phase === "finished";
   const displayedAnswer =
-    answerQuestionIndex === currentQuestionIndex ? answer : answerToText(state?.myAnswer?.answer);
+    answerQuestionKey === currentQuestionKey ? answer : state?.myAnswer?.answer ?? (isOrderingQuestion(question) ? [] : "");
   const storedToken = useMemo(() => {
     if (!code || typeof window === "undefined") {
       return null;
@@ -139,7 +292,7 @@ export function PlayerApp() {
   async function submitAnswer(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (!code || !token || !displayedAnswer.trim()) {
+    if (!code || !token || !answerReady(question, displayedAnswer)) {
       return;
     }
 
@@ -147,7 +300,11 @@ export function PlayerApp() {
     setNotice("");
 
     try {
-      const nextState = await quizApi.submitAnswer(code, displayedAnswer.trim(), token);
+      const nextState = await quizApi.submitAnswer(
+        code,
+        Array.isArray(displayedAnswer) ? displayedAnswer : displayedAnswer.trim(),
+        token,
+      );
       setState(nextState);
       setNotice(isClosed ? "제출 마감 이후에는 답을 바꿀 수 없습니다." : "답안을 제출했습니다.");
     } catch (error) {
@@ -222,18 +379,19 @@ export function PlayerApp() {
           <WaitingPanel />
         ) : phase === "finished" ? (
           <ResultPanel state={state} />
-        ) : isEliminated ? (
-          <SpectatorPanel question={question} phase={phase} />
+        ) : !isRoundParticipant ? (
+          <SpectatorPanel question={question} phase={phase} roundKind={roundKind} />
         ) : (
           <QuestionPanel
             question={question}
+            roundKind={roundKind}
             answer={displayedAnswer}
             onAnswer={(value) => {
-              setAnswerQuestionIndex(currentQuestionIndex);
+              setAnswerQuestionKey(currentQuestionKey);
               setAnswer(value);
             }}
             onSubmit={submitAnswer}
-            disabled={busy || isClosed}
+            disabled={busy || isClosed || !canSubmit}
             phase={phase}
             lastAnswer={answerToText(state?.myAnswer?.answer)}
           />
@@ -247,11 +405,12 @@ export function PlayerApp() {
 function StatusPanel({ state }: { state: RoomState | null }) {
   const participant = state?.me ?? null;
   const survivorCount = (state?.participants ?? []).filter((item) => !item.eliminated).length;
+  const roundKind = roundKindFrom(state, state?.currentQuestion ?? null);
 
   return (
     <section className="grid grid-cols-4 gap-2">
       <Metric label="단계" value={phaseLabel(state?.phase)} />
-      <Metric label="문제" value={questionNumberLabel(state?.currentQuestionIndex)} />
+      <Metric label="구분" value={roundLabel(roundKind, state?.currentQuestion ?? null)} />
       <Metric label="생존" value={`${survivorCount}명`} />
       <Metric label="상태" value={participant?.eliminated ? "탈락" : "생존"} />
     </section>
@@ -270,20 +429,61 @@ function WaitingPanel() {
   );
 }
 
-function SpectatorPanel({ question, phase }: { question: QuizQuestion; phase: string }) {
+function QuestionImages({ question }: { question: QuizQuestion }) {
+  if (!question.images?.length) {
+    return null;
+  }
+
+  return (
+    <div className="mt-4 grid grid-cols-2 gap-2">
+      {question.images.slice(0, 4).map((image) => (
+        <div key={image} className="aspect-video overflow-hidden rounded-md border bg-[#f7f2e8]">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={image} alt="" className="h-full w-full object-cover" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function QuestionOptions({ question }: { question: QuizQuestion }) {
+  if (!question.options?.length) {
+    return null;
+  }
+
+  return (
+    <div className="mt-4 grid gap-2 text-left">
+      {question.options.map((option, index) => (
+        <div key={`${option}-${index}`} className="rounded-md border-2 border-zinc-200 bg-white px-4 py-3 font-black">
+          <span className="mr-2 text-[#b27600]">{index + 1}</span>
+          {option}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SpectatorPanel({ question, phase, roundKind }: { question: QuizQuestion; phase: string; roundKind: RoundKind }) {
   const showAnswer = phase === "revealed";
+  const title = roundKind === "revival" ? "패자부활전 대기" : "관전 중";
+  const description =
+    roundKind === "revival"
+      ? "진행자가 문제를 열면 다시 답을 제출할 수 있습니다."
+      : "탈락 이후 일반 문제는 답을 제출할 수 없습니다.";
 
   return (
     <section className="rounded-md border-2 border-zinc-950 bg-white p-5 text-center shadow-[8px_8px_0_#18181b]">
-      <h1 className="text-3xl font-black">관전 중</h1>
-      <p className="mt-2 text-zinc-600">탈락 이후에는 답을 제출할 수 없습니다.</p>
+      <h1 className="text-3xl font-black">{title}</h1>
+      <p className="mt-2 text-zinc-600">{description}</p>
       <div className="mt-5 rounded-md bg-[#f7f2e8] p-4 text-left">
         <p className="text-sm font-bold text-zinc-500">현재 문제</p>
         <p className="mt-1 text-xl font-black">{question.prompt}</p>
+        <QuestionImages question={question} />
+        <QuestionOptions question={question} />
         {showAnswer ? (
           <div className="mt-4 rounded-md bg-white p-3">
             <p className="text-sm font-bold text-zinc-500">정답</p>
-            <p className="text-2xl font-black">{question.correctAnswers.join(", ")}</p>
+            <p className="text-2xl font-black">{answerToText(question.correctAnswers)}</p>
             {question.explanation ? <p className="mt-2 text-sm leading-6">{question.explanation}</p> : null}
           </div>
         ) : null}
@@ -294,6 +494,7 @@ function SpectatorPanel({ question, phase }: { question: QuizQuestion; phase: st
 
 function QuestionPanel({
   question,
+  roundKind,
   answer,
   onAnswer,
   onSubmit,
@@ -302,8 +503,9 @@ function QuestionPanel({
   lastAnswer,
 }: {
   question: QuizQuestion;
-  answer: string;
-  onAnswer: (value: string) => void;
+  roundKind: RoundKind;
+  answer: AnswerDraft;
+  onAnswer: (value: AnswerDraft) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   disabled: boolean;
   phase: string;
@@ -314,25 +516,22 @@ function QuestionPanel({
   return (
     <form onSubmit={onSubmit} className="rounded-md border-2 border-zinc-950 bg-white p-5 shadow-[8px_8px_0_#ffcf4a]">
       <p className="text-sm font-bold text-zinc-500">
-        {question.kind === "ox" ? "O/X" : question.kind === "multiple" ? "객관식" : "주관식"}
-        {question.isTiebreaker ? " · 타이브레이커" : ""}
+        {roundLabel(roundKind, question)} · {questionKindLabel(question)}
       </p>
       <h1 className="mt-2 text-3xl font-black leading-tight">{question.prompt}</h1>
 
-      {question.images?.length ? (
-        <div className="mt-4 grid grid-cols-2 gap-2">
-          {question.images.slice(0, 4).map((image) => (
-            <div key={image} className="aspect-video overflow-hidden rounded-md border bg-[#f7f2e8]">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={image} alt="" className="h-full w-full object-cover" />
-            </div>
-          ))}
-        </div>
-      ) : null}
+      <QuestionImages question={question} />
 
-      {question.kind === "short" ? (
+      {isOrderingQuestion(question) ? (
+        <OrderingAnswer
+          options={question.options ?? []}
+          answer={Array.isArray(answer) ? answer : []}
+          onAnswer={onAnswer}
+          disabled={disabled}
+        />
+      ) : question.kind === "short" ? (
         <textarea
-          value={answer}
+          value={typeof answer === "string" ? answer : answerToText(answer)}
           onChange={(event) => onAnswer(event.target.value)}
           disabled={disabled}
           placeholder="답을 입력하세요"
@@ -368,14 +567,14 @@ function QuestionPanel({
       {phase === "revealed" ? (
         <div className="mt-4 rounded-md bg-zinc-950 p-4 text-white">
           <p className="text-sm font-bold text-zinc-300">정답</p>
-          <p className="text-2xl font-black">{question.correctAnswers.join(", ")}</p>
+          <p className="text-2xl font-black">{answerToText(question.correctAnswers)}</p>
           {question.explanation ? <p className="mt-3 text-sm leading-6 text-zinc-200">{question.explanation}</p> : null}
         </div>
       ) : null}
 
       <Button
         className="mt-5 h-14 w-full bg-zinc-950 text-lg font-black text-white hover:bg-black"
-        disabled={disabled || !answer.trim()}
+        disabled={disabled || !answerReady(question, answer)}
       >
         {closed ? <Check aria-hidden /> : <Send aria-hidden />}
         {closed ? "제출 마감" : "답안 제출"}
@@ -386,6 +585,86 @@ function QuestionPanel({
         </p>
       ) : null}
     </form>
+  );
+}
+
+function OrderingAnswer({
+  options,
+  answer,
+  onAnswer,
+  disabled,
+}: {
+  options: string[];
+  answer: string[];
+  onAnswer: (value: string[]) => void;
+  disabled: boolean;
+}) {
+  const useCounts = answer.reduce<Record<string, number>>((counts, option) => {
+    counts[option] = (counts[option] ?? 0) + 1;
+    return counts;
+  }, {});
+
+  function optionCount(option: string) {
+    return options.filter((item) => item === option).length;
+  }
+
+  return (
+    <div className="mt-5 grid gap-4">
+      <div className="min-h-24 rounded-md border-2 border-zinc-950 bg-[#f7f2e8] p-3">
+        <p className="text-sm font-bold text-zinc-500">내가 고른 순서</p>
+        {answer.length ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {answer.map((option, index) => (
+              <span key={`${option}-${index}`} className="rounded-md bg-[#ffcf4a] px-3 py-2 text-lg font-black">
+                {index + 1}. {option}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <p className="mt-3 text-sm font-bold text-zinc-500">아래 보기를 순서대로 눌러 주세요.</p>
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        {options.map((option, index) => {
+          const used = (useCounts[option] ?? 0) >= optionCount(option);
+          return (
+            <button
+              key={`${option}-${index}`}
+              type="button"
+              disabled={disabled || used}
+              onClick={() => onAnswer([...answer, option])}
+              className="min-h-14 rounded-md border-2 border-zinc-200 bg-white px-4 text-left text-xl font-black transition hover:border-zinc-950 disabled:bg-zinc-100 disabled:text-zinc-400"
+            >
+              {option}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          className="h-12 border-2 border-zinc-950 font-black"
+          disabled={disabled || answer.length === 0}
+          onClick={() => onAnswer(answer.slice(0, -1))}
+        >
+          <Undo2 aria-hidden />
+          되돌리기
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          className="h-12 border-2 border-zinc-950 font-black"
+          disabled={disabled || answer.length === 0}
+          onClick={() => onAnswer([])}
+        >
+          <RotateCcw aria-hidden />
+          초기화
+        </Button>
+      </div>
+    </div>
   );
 }
 

@@ -3,10 +3,82 @@
 import { useEffect, useMemo, useState } from "react";
 import { QrCode, Trophy, Users } from "lucide-react";
 import { BRAND_NAME } from "@/lib/client/brand";
-import { phaseLabel, questionNumberLabel, quizApi, RoomState } from "@/lib/client/quiz-api";
+import { phaseLabel, questionNumberLabel, quizApi, QuizQuestion, RoomState } from "@/lib/client/quiz-api";
 
 function aliveCount(state: RoomState | null) {
   return (state?.participants ?? []).filter((participant) => !participant.eliminated).length;
+}
+
+type RoundKind = "normal" | "revival" | "tiebreaker" | string;
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function getStringField(value: unknown, keys: string[]) {
+  const record = asRecord(value);
+  for (const key of keys) {
+    if (typeof record[key] === "string" && record[key]) {
+      return record[key] as string;
+    }
+  }
+
+  return "";
+}
+
+function roundKindFrom(state: RoomState | null, question: QuizQuestion | null): RoundKind {
+  const room = asRecord(state?.room);
+  const stateKind = getStringField(state, ["roundKind", "roundType", "questionCategory", "currentQuestionCategory"]);
+  const roomKind = getStringField(room, ["roundKind", "roundType", "questionCategory", "currentQuestionCategory"]);
+  const questionKind = getStringField(question, ["roundKind", "roundType", "category", "questionCategory"]);
+  const rawKind = stateKind || roomKind || questionKind || "normal";
+  const normalizedKind = rawKind.toLocaleLowerCase("ko-KR");
+
+  if (question?.isTiebreaker || normalizedKind.includes("tie") || normalizedKind.includes("동점")) {
+    return "tiebreaker";
+  }
+
+  if (normalizedKind.includes("revival") || normalizedKind.includes("rescue") || normalizedKind.includes("부활")) {
+    return "revival";
+  }
+
+  return rawKind;
+}
+
+function roundLabel(kind: RoundKind, question: QuizQuestion | null) {
+  if (kind === "revival") {
+    return "패자부활전";
+  }
+
+  if (kind === "tiebreaker" || question?.isTiebreaker) {
+    return "동점자 문제";
+  }
+
+  return "일반 문제";
+}
+
+function isOrderingQuestion(question: QuizQuestion | null) {
+  return question?.kind === "order";
+}
+
+function questionKindLabel(question: QuizQuestion | null) {
+  if (!question) {
+    return "-";
+  }
+
+  if (isOrderingQuestion(question)) {
+    return "순서 나열";
+  }
+
+  if (question.kind === "ox") {
+    return "O/X";
+  }
+
+  if (question.kind === "multiple") {
+    return "객관식";
+  }
+
+  return "주관식";
 }
 
 export function DisplayBoard({ code }: { code: string }) {
@@ -142,6 +214,7 @@ function QuestionScreen({ state }: { state: RoomState | null }) {
   const question = state?.currentQuestion ?? null;
   const phase = state?.phase ?? "question";
   const showAnswer = phase === "revealed";
+  const roundKind = roundKindFrom(state, question);
   const participants = state?.participants ?? [];
   const submitted =
     state?.room?.submittedCount ??
@@ -151,8 +224,7 @@ function QuestionScreen({ state }: { state: RoomState | null }) {
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
       <section className="rounded-md border-2 border-zinc-950 bg-white p-8 shadow-[10px_10px_0_#18181b]">
         <p className="text-xl font-black text-[#b27600]">
-          문제 {questionNumberLabel(state?.currentQuestionIndex)}
-          {question?.isTiebreaker ? " · 타이브레이커" : ""}
+          {roundLabel(roundKind, question)} · 문제 {questionNumberLabel(state?.currentQuestionIndex)} · {questionKindLabel(question)}
         </p>
         <h1 className="mt-4 text-6xl font-black leading-tight">
           {question?.prompt ?? "문제를 준비하고 있습니다."}
@@ -172,7 +244,7 @@ function QuestionScreen({ state }: { state: RoomState | null }) {
         {question?.options?.length ? (
           <div className="mt-8 grid grid-cols-2 gap-4">
             {question.options.map((option, index) => (
-              <div key={option} className="rounded-md border-2 border-zinc-950 p-6 text-3xl font-black">
+              <div key={`${option}-${index}`} className="rounded-md border-2 border-zinc-950 p-6 text-3xl font-black">
                 <span className="mr-4 text-[#b27600]">{index + 1}</span>
                 {option}
               </div>
@@ -183,7 +255,9 @@ function QuestionScreen({ state }: { state: RoomState | null }) {
         {showAnswer && question ? (
           <div className="mt-8 rounded-md bg-[#ffcf4a] p-6">
             <p className="text-lg font-black">정답</p>
-            <p className="mt-1 text-5xl font-black">{question.correctAnswers.join(", ")}</p>
+            <p className="mt-1 text-5xl font-black">
+              {isOrderingQuestion(question) ? question.correctAnswers.join(" → ") : question.correctAnswers.join(", ")}
+            </p>
             {question.explanation ? <p className="mt-4 text-xl leading-8">{question.explanation}</p> : null}
           </div>
         ) : null}
@@ -191,6 +265,7 @@ function QuestionScreen({ state }: { state: RoomState | null }) {
 
       <aside className="grid gap-4">
         <BigMetric label="단계" value={phaseLabel(phase)} />
+        <BigMetric label="구분" value={roundLabel(roundKind, question)} />
         <BigMetric label="제출" value={`${submitted} / ${participants.length}`} />
         <BigMetric label="생존" value={`${aliveCount(state)}명`} />
       </aside>

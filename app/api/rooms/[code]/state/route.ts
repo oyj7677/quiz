@@ -8,10 +8,10 @@ export async function GET(request: Request, context: { params: Promise<{ code: s
     const host = await getHostSession(request);
     const playerToken = playerTokenFrom(request);
     const view = new URL(request.url).searchParams.get("view");
+    if (view === "display") {
+      return json(await getRoomState(code, "display"), { headers: { "Cache-Control": "no-store" } });
+    }
     if (!host && !playerToken) {
-      if (view === "display") {
-        return json(await getRoomState(code, "display"), { headers: { "Cache-Control": "no-store" } });
-      }
       return fail("로그인 또는 참가자 인증이 필요합니다.", 401);
     }
 

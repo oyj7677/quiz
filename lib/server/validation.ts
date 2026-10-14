@@ -1,4 +1,4 @@
-import type { AnswerValue, Question, QuizPayload } from "./types";
+import type { AnswerValue, Question, QuestionCategory, QuizPayload } from "./types";
 
 const MAX_IMAGES = 4;
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
@@ -31,6 +31,16 @@ export function normalizeAnswer(value: AnswerValue) {
 }
 
 export function answerMatches(question: Question, value: AnswerValue) {
+  if (question.kind === "order") {
+    if (!Array.isArray(value)) {
+      return false;
+    }
+
+    const expected = question.correctAnswers.map(normalizeText);
+    const actual = value.map(normalizeText);
+    return expected.length === actual.length && expected.every((answer, index) => answer === actual[index]);
+  }
+
   const expected = normalizeAnswer(question.correctAnswers);
   const actual = normalizeAnswer(value);
 
@@ -66,7 +76,7 @@ export function validateQuestion(input: unknown, index = 0, forceTiebreaker = fa
 
   const record = input as Record<string, unknown>;
   const kind = record.kind;
-  if (kind !== "ox" && kind !== "multiple" && kind !== "short") {
+  if (kind !== "ox" && kind !== "multiple" && kind !== "short" && kind !== "order") {
     throw new Error(`question ${index + 1} kind is invalid`);
   }
 
@@ -81,10 +91,11 @@ export function validateQuestion(input: unknown, index = 0, forceTiebreaker = fa
   }
 
   const correctAnswers = cleanStringArray(record.correctAnswers);
-  if (correctAnswers.length === 0) {
+  if (kind !== "order" && correctAnswers.length === 0) {
     throw new Error(`question ${index + 1} correctAnswers is required`);
   }
 
+  const category = normalizeQuestionCategory(record.category, Boolean(record.isTiebreaker));
   const question: Question = {
     id: cleanString(record.id) || crypto.randomUUID(),
     kind,
@@ -92,7 +103,8 @@ export function validateQuestion(input: unknown, index = 0, forceTiebreaker = fa
     correctAnswers,
     explanation: cleanString(record.explanation),
     images,
-    isTiebreaker: forceTiebreaker || Boolean(record.isTiebreaker),
+    category: forceTiebreaker ? "tiebreaker" : category,
+    isTiebreaker: forceTiebreaker || category === "tiebreaker",
   };
 
   if (kind === "ox") {
@@ -118,7 +130,30 @@ export function validateQuestion(input: unknown, index = 0, forceTiebreaker = fa
     question.options = options;
   }
 
+  if (kind === "order") {
+    const options = cleanStringArray(record.options);
+    if (options.length < 3) {
+      throw new Error(`question ${index + 1} order options must have at least 3 items`);
+    }
+    if (options.length > 6) {
+      throw new Error(`question ${index + 1} order options can have up to 6 items`);
+    }
+    if (new Set(options).size !== options.length) {
+      throw new Error(`question ${index + 1} order options must be unique`);
+    }
+    question.options = options;
+    question.correctAnswers = options;
+  }
+
   return question;
+}
+
+export function normalizeQuestionCategory(value: unknown, isTiebreaker = false): QuestionCategory {
+  if (value === "regular" || value === "revival" || value === "tiebreaker") {
+    return value;
+  }
+
+  return isTiebreaker ? "tiebreaker" : "regular";
 }
 
 export function validateQuizPayload(payload: QuizPayload) {

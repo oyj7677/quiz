@@ -22,6 +22,13 @@
       "when": 1791899663505,
       "tag": "0002_safe_silver_surfer",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1791958832897,
+      "tag": "0003_cooing_loa",
+      "breakpoints": true
     }
   ]
 }

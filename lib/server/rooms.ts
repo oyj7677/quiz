@@ -3,15 +3,17 @@ import { getDb } from "@/db";
 import { answers, participants, quizzes, roomQuestions, rooms } from "@/db/schema";
 import { now, randomId, roomCode, sign } from "./crypto";
 import { requireD1, requireSecret } from "./env";
-import type { AnswerValue, Question } from "./types";
-import { answerMatches, parseAnswerValue, publicQuestion, validateQuestion } from "./validation";
+import type { AnswerValue, Question, QuestionCategory } from "./types";
+import { answerMatches, normalizeQuestionCategory, parseAnswerValue, publicQuestion, validateQuestion } from "./validation";
 
 const MAX_PARTICIPANTS = 50;
 
 type Role = "host" | "player" | "display";
+type SelectionMode = "random" | "sequential";
 
 type DbRoom = typeof rooms.$inferSelect;
 type DbParticipant = typeof participants.$inferSelect;
+type DbRoomQuestion = typeof roomQuestions.$inferSelect;
 function parseQuestion(value: string): Question {
   return JSON.parse(value) as Question;
 }
@@ -20,11 +22,83 @@ function parseAnswer(value: string): AnswerValue {
   return JSON.parse(value) as AnswerValue;
 }
 
+function parseStringArray(value: string | null | undefined) {
+  if (!value) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 function iso(value: number | null) {
   return value ? new Date(value).toISOString() : undefined;
 }
 
-function participantPublic(participant: DbParticipant, rank?: number) {
+function questionCategory(question: Question, row?: Pick<DbRoomQuestion, "category" | "isTiebreaker">): QuestionCategory {
+  return normalizeQuestionCategory(question.category ?? row?.category, Boolean(question.isTiebreaker || row?.isTiebreaker));
+}
+
+function requestedCategory(value: unknown, fallback: QuestionCategory): QuestionCategory {
+  if (value === "regular" || value === "revival" || value === "tiebreaker") {
+    return value;
+  }
+
+  return fallback;
+}
+
+function normalizeSelectionMode(value: unknown, fallback: string): SelectionMode {
+  if (value === "sequential" || value === "random") {
+    return value;
+  }
+
+  return fallback === "sequential" ? "sequential" : "random";
+}
+
+function shuffle<T>(values: T[]) {
+  const next = [...values];
+  for (let index = next.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [next[index], next[swapIndex]] = [next[swapIndex], next[index]];
+  }
+  return next;
+}
+
+function shuffledDifferent(values: string[]) {
+  const shuffled = shuffle(values);
+  if (values.length > 1 && shuffled.every((value, index) => value === values[index])) {
+    [shuffled[0], shuffled[1]] = [shuffled[1], shuffled[0]];
+  }
+  return shuffled;
+}
+
+function snapshotQuestion(question: Question) {
+  const category = questionCategory(question);
+  const normalized = {
+    ...question,
+    category,
+    isTiebreaker: category === "tiebreaker",
+  };
+
+  if (normalized.kind === "order" && normalized.options?.length) {
+    return {
+      ...normalized,
+      options: shuffledDifferent(normalized.options),
+    };
+  }
+
+  return normalized;
+}
+
+function participantPublic(
+  participant: DbParticipant,
+  rank?: number,
+  flags: { eligibleForRound?: boolean; canSubmit?: boolean } = {}
+) {
   return {
     id: participant.id,
     nickname: participant.nickname,
@@ -34,6 +108,8 @@ function participantPublic(participant: DbParticipant, rank?: number) {
     eliminated: participant.status === "eliminated",
     status: participant.status,
     eliminatedRound: participant.eliminatedRound,
+    eligibleForRound: Boolean(flags.eligibleForRound),
+    canSubmit: Boolean(flags.canSubmit),
     joinedAt: iso(participant.joinedAt),
     rank,
   };
@@ -92,9 +168,12 @@ export async function createRoom(quizId: string) {
     throw new Error("퀴즈를 찾을 수 없습니다.");
   }
 
-  const questions = (JSON.parse(quiz.questionsJson) as Question[]).sort(
-    (left, right) => Number(Boolean(left.isTiebreaker)) - Number(Boolean(right.isTiebreaker))
-  );
+  const questions = (JSON.parse(quiz.questionsJson) as Question[])
+    .map(snapshotQuestion)
+    .sort((left, right) => {
+      const order: Record<QuestionCategory, number> = { regular: 0, revival: 1, tiebreaker: 2 };
+      return order[questionCategory(left)] - order[questionCategory(right)];
+    });
   const timestamp = now();
   let code = roomCode();
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -108,6 +187,10 @@ export async function createRoom(quizId: string) {
     quizId,
     status: "lobby",
     currentPosition: null,
+    currentCategory: "regular",
+    currentEligibleJson: "[]",
+    selectionMode: "random",
+    lastSurvivorIdsJson: "[]",
     roundNumber: 0,
     acceptingAnswers: false,
     scoredRound: null,
@@ -125,7 +208,9 @@ export async function createRoom(quizId: string) {
         roomCode: code,
         position: index,
         questionJson: JSON.stringify(question),
-        isTiebreaker: Boolean(question.isTiebreaker),
+        category: questionCategory(question),
+        usedAt: null,
+        isTiebreaker: questionCategory(question) === "tiebreaker",
         createdAt: timestamp,
       }))
     );
@@ -311,30 +396,130 @@ async function currentRoomQuestion(room: DbRoom) {
   });
 }
 
-async function startPosition(room: DbRoom, position: number, allowedStatus: DbRoom["status"][]) {
-  const db = getDb();
-  const question = await db.query.roomQuestions.findFirst({
-    where: and(eq(roomQuestions.roomCode, room.code), eq(roomQuestions.position, position)),
-  });
-  if (!question) {
-    throw new Error("문제를 찾을 수 없습니다.");
+async function eligibleParticipantIds(roomCodeValue: string, category: QuestionCategory) {
+  const rows = await getDb()
+    .select()
+    .from(participants)
+    .where(eq(participants.roomCode, roomCodeValue));
+
+  if (category === "revival") {
+    return rows.filter((participant) => participant.status === "eliminated").map((participant) => participant.id);
   }
 
-  const timestamp = now();
-  const updated = await db
-    .update(rooms)
-    .set({
-      status: "question",
-      currentPosition: position,
-      acceptingAnswers: true,
-      roundNumber: room.roundNumber + 1,
-      startedAt: room.startedAt ?? timestamp,
-      updatedAt: timestamp,
-    })
-    .where(and(eq(rooms.code, room.code), inArray(rooms.status, allowedStatus)))
-    .returning();
+  return rows.filter((participant) => participant.status === "active").map((participant) => participant.id);
+}
 
-  if (!updated.length) {
+async function selectQuestion(
+  room: DbRoom,
+  category: QuestionCategory,
+  questionId: string | undefined,
+  mode: SelectionMode
+) {
+  const db = getDb();
+  const candidates = await db
+    .select()
+    .from(roomQuestions)
+    .where(and(eq(roomQuestions.roomCode, room.code), eq(roomQuestions.category, category), isNull(roomQuestions.usedAt)))
+    .orderBy(asc(roomQuestions.position));
+
+  if (!candidates.length) {
+    throw new Error("사용 가능한 문제가 없습니다.");
+  }
+
+  if (questionId) {
+    const selected = candidates.find((question) => question.id === questionId);
+    if (!selected) {
+      throw new Error("선택한 문제를 사용할 수 없습니다.");
+    }
+    return selected;
+  }
+
+  return mode === "sequential"
+    ? candidates[0]
+    : candidates[Math.floor(Math.random() * candidates.length)];
+}
+
+async function startQuestion(
+  room: DbRoom,
+  category: QuestionCategory,
+  allowedStatus: DbRoom["status"][],
+  options: { questionId?: string; selectionMode?: unknown } = {}
+) {
+  if (category === "regular") {
+    const active = await eligibleParticipantIds(room.code, "regular");
+    if (active.length === 0) {
+      throw new Error("생존자가 없으면 일반 문제를 낼 수 없습니다.");
+    }
+  }
+
+  const mode = normalizeSelectionMode(options.selectionMode, room.selectionMode);
+  const question = await selectQuestion(room, category, options.questionId, mode);
+  const eligibleIds = await eligibleParticipantIds(room.code, category);
+  if (eligibleIds.length === 0) {
+    throw new Error(category === "revival" ? "패자부활전에 참여할 탈락자가 없습니다." : "문제를 풀 참가자가 없습니다.");
+  }
+
+  const currentActiveIds = category === "revival"
+    ? parseStringArray(room.lastSurvivorIdsJson)
+    : await eligibleParticipantIds(room.code, "regular");
+  const timestamp = now();
+  const statusPlaceholders = allowedStatus.map(() => "?").join(", ");
+  const results = await requireD1().batch([
+    requireD1()
+      .prepare(
+        `update room_questions
+        set used_at = ?
+        where room_code = ?
+          and id = ?
+          and used_at is null
+          and exists (
+            select 1 from rooms
+            where rooms.code = room_questions.room_code
+              and rooms.status in (${statusPlaceholders})
+          )`
+      )
+      .bind(timestamp, room.code, question.id, ...allowedStatus),
+    requireD1()
+      .prepare(
+        `update rooms
+        set status = 'question',
+            current_position = ?,
+            current_category = ?,
+            current_eligible_json = ?,
+            selection_mode = ?,
+            last_survivor_ids_json = ?,
+            accepting_answers = 1,
+            round_number = round_number + 1,
+            started_at = coalesce(started_at, ?),
+            updated_at = ?
+        where code = ?
+          and status in (${statusPlaceholders})
+          and exists (
+            select 1 from room_questions
+            where room_questions.room_code = rooms.code
+              and room_questions.id = ?
+              and room_questions.used_at = ?
+          )`
+      )
+      .bind(
+        question.position,
+        category,
+        JSON.stringify(eligibleIds),
+        mode,
+        JSON.stringify(currentActiveIds),
+        timestamp,
+        timestamp,
+        room.code,
+        ...allowedStatus,
+        question.id,
+        timestamp
+      ),
+  ]);
+
+  if (!results[0]?.meta?.changes) {
+    throw new Error("이미 사용된 문제입니다.");
+  }
+  if (!results[1]?.meta?.changes) {
     throw new Error("방 상태가 변경되었습니다.");
   }
 }
@@ -349,12 +534,16 @@ async function getRoomOrThrow(code: string) {
   return room;
 }
 
-export async function startRoom(code: string) {
+export async function startRoom(code: string, options: { category?: QuestionCategory; questionId?: string; selectionMode?: unknown } = {}) {
   const room = await getRoomOrThrow(code);
   if (room.status !== "lobby") {
     throw new Error("이미 시작된 게임입니다.");
   }
-  await startPosition(room, 0, ["lobby"]);
+  const category = requestedCategory(options.category, "regular");
+  if (category !== "regular") {
+    throw new Error("처음 시작은 일반 문제만 가능합니다.");
+  }
+  await startQuestion(room, "regular", ["lobby"], options);
 }
 
 export async function submitAnswer(code: string, token: string | null, value: unknown) {
@@ -364,13 +553,14 @@ export async function submitAnswer(code: string, token: string | null, value: un
   if (!participant) {
     throw new Error("참가자 인증 정보가 올바르지 않습니다.");
   }
-  if (participant.status !== "active") {
-    throw new Error("탈락한 참가자는 답안을 제출할 수 없습니다.");
-  }
 
   const room = await getRoomOrThrow(code);
   if (room.status !== "question" || !room.acceptingAnswers || room.currentPosition === null) {
     throw new Error("정답 제출이 마감되었습니다.");
+  }
+  const eligibleIds = parseStringArray(room.currentEligibleJson);
+  if (!eligibleIds.includes(participant.id)) {
+    throw new Error("현재 문제에 답할 수 없습니다.");
   }
 
   const questionRow = await currentRoomQuestion(room);
@@ -392,7 +582,7 @@ export async function submitAnswer(code: string, token: string | null, value: un
         and r.status = 'question'
         and r.accepting_answers = 1
         and p.token_hash = ?
-        and p.status = 'active'
+        and p.id in (select value from json_each(?))
       on conflict(room_code, round_number, participant_id) do update set
         answer_json = excluded.answer_json,
         is_correct = excluded.is_correct,
@@ -407,7 +597,8 @@ export async function submitAnswer(code: string, token: string | null, value: un
       timestamp,
       timestamp,
       code,
-      tokenDigest
+      tokenDigest,
+      JSON.stringify(eligibleIds)
     )
     .run();
 
@@ -484,6 +675,56 @@ export async function revealQuestion(code: string) {
   }
 
   const timestamp = now();
+  if ((room.scoredRound ?? 0) >= room.roundNumber) {
+    throw new Error("이미 공개된 문제입니다.");
+  }
+
+  const eligibleJson = JSON.stringify(parseStringArray(room.currentEligibleJson));
+  if (room.currentCategory === "revival") {
+    const results = await requireD1().batch([
+      requireD1()
+        .prepare(
+          `update participants
+        set status = 'active',
+            eliminated_round = null,
+            last_seen_at = ?
+        where room_code = ?
+          and status = 'eliminated'
+          and participants.id in (select value from json_each(?))
+          and exists (
+            select 1 from rooms r
+            where r.code = participants.room_code
+              and r.status = 'closed'
+              and coalesce(r.scored_round, 0) < r.round_number
+          )
+          and exists (
+            select 1 from answers a
+            where a.room_code = participants.room_code
+              and a.participant_id = participants.id
+              and a.round_number = ?
+              and a.is_correct = 1
+          )`
+        )
+        .bind(timestamp, code, eligibleJson, room.roundNumber),
+      requireD1()
+        .prepare(
+          `update rooms
+          set status = 'revealed',
+              accepting_answers = 0,
+              scored_round = round_number,
+              updated_at = ?
+          where code = ?
+            and status = 'closed'
+            and coalesce(scored_round, 0) < round_number`
+        )
+        .bind(timestamp, code),
+    ]);
+    if (!results.at(-1)?.meta?.changes) {
+      throw new Error("이미 공개된 문제입니다.");
+    }
+    return;
+  }
+
   const results = await requireD1().batch([
     requireD1()
       .prepare(
@@ -492,6 +733,7 @@ export async function revealQuestion(code: string) {
             correct_count = correct_count + 1
         where room_code = ?
           and status = 'active'
+          and participants.id in (select value from json_each(?))
           and exists (
             select 1 from rooms r
             where r.code = participants.room_code
@@ -500,22 +742,22 @@ export async function revealQuestion(code: string) {
           )
           and exists (
             select 1 from answers a
-            join rooms r on r.code = a.room_code
             where a.room_code = participants.room_code
               and a.participant_id = participants.id
-              and a.round_number = r.round_number
+              and a.round_number = ?
               and a.is_correct = 1
           )`
       )
-      .bind(code),
+      .bind(code, eligibleJson, room.roundNumber),
     requireD1()
       .prepare(
         `update participants
         set status = 'eliminated',
-            eliminated_round = (select round_number from rooms where code = ?),
+            eliminated_round = ?,
             last_seen_at = ?
         where room_code = ?
           and status = 'active'
+          and participants.id in (select value from json_each(?))
           and exists (
             select 1 from rooms r
             where r.code = participants.room_code
@@ -524,52 +766,26 @@ export async function revealQuestion(code: string) {
           )
           and not exists (
             select 1 from answers a
-            join rooms r on r.code = a.room_code
             where a.room_code = participants.room_code
               and a.participant_id = participants.id
-              and a.round_number = r.round_number
+              and a.round_number = ?
               and a.is_correct = 1
           )`
       )
-      .bind(code, timestamp, code),
-    requireD1()
-      .prepare(
-        `update participants
-        set status = 'winner'
-        where room_code = ?
-          and status = 'active'
-          and exists (
-            select 1 from rooms r
-            where r.code = participants.room_code
-              and r.status = 'closed'
-              and coalesce(r.scored_round, 0) < r.round_number
-          )
-          and (select count(*) from participants p where p.room_code = ? and p.status = 'active') = 1`
-      )
-      .bind(code, code),
+      .bind(room.roundNumber, timestamp, code, eligibleJson, room.roundNumber),
     requireD1()
       .prepare(
         `update rooms
-        set status = case
-              when (select count(*) from participants p where p.room_code = rooms.code and p.status = 'winner') = 1
-                then 'finished'
-              else 'revealed'
-            end,
+        set status = 'revealed',
             accepting_answers = 0,
             scored_round = round_number,
-            ended_at = case
-              when (select count(*) from participants p where p.room_code = rooms.code and p.status = 'winner') = 1
-                then ?
-              else ended_at
-            end,
             updated_at = ?
         where code = ?
           and status = 'closed'
           and coalesce(scored_round, 0) < round_number`
       )
-      .bind(timestamp, timestamp, code),
+      .bind(timestamp, code),
   ]);
-
   if (!results.at(-1)?.meta?.changes) {
     throw new Error("이미 공개된 문제입니다.");
   }
@@ -584,71 +800,83 @@ async function restoreAllWrongFinalists(room: DbRoom) {
     return;
   }
 
+  const lastSurvivorIds = parseStringArray(room.lastSurvivorIdsJson);
+  if (lastSurvivorIds.length) {
+    await getDb()
+      .update(participants)
+      .set({ status: "active", eliminatedRound: null })
+      .where(and(eq(participants.roomCode, room.code), inArray(participants.id, lastSurvivorIds)));
+    return;
+  }
+
   await getDb()
     .update(participants)
     .set({ status: "active", eliminatedRound: null })
     .where(and(eq(participants.roomCode, room.code), eq(participants.eliminatedRound, room.roundNumber)));
 }
 
-export async function nextQuestion(code: string) {
+export async function nextQuestion(
+  code: string,
+  options: { category?: QuestionCategory; questionId?: string; selectionMode?: unknown } = {}
+) {
   const room = await getRoomOrThrow(code);
   if (room.status !== "revealed") {
     throw new Error("현재 문제의 정답을 먼저 공개해 주세요.");
   }
 
-  let active = await getDb()
+  const category = requestedCategory(options.category, "regular");
+  const active = await getDb()
     .select()
     .from(participants)
     .where(and(eq(participants.roomCode, code), eq(participants.status, "active")));
-  const next = await getDb().query.roomQuestions.findFirst({
-    where: and(eq(roomQuestions.roomCode, code), eq(roomQuestions.position, (room.currentPosition ?? -1) + 1)),
-  });
-  if (active.length === 0 && next?.isTiebreaker) {
-    await restoreAllWrongFinalists(room);
-    active = await getDb()
-      .select()
-      .from(participants)
-      .where(and(eq(participants.roomCode, code), eq(participants.status, "active")));
-  }
-  if (active.length === 0) {
-    throw new Error("동점자 문제가 필요합니다.");
-  }
-  if (active.length === 1) {
-    await getDb()
-      .update(participants)
-      .set({ status: "winner" })
-      .where(eq(participants.id, active[0].id));
-    await getDb()
-      .update(rooms)
-      .set({ status: "finished", endedAt: now(), updatedAt: now() })
-      .where(eq(rooms.code, code));
-    return;
+
+  if (category === "regular" && active.length === 0) {
+    throw new Error("생존자가 없으면 일반 문제를 낼 수 없습니다.");
   }
 
-  if (!next) {
-    throw new Error("동점자 문제가 필요합니다.");
+  if (category === "tiebreaker") {
+    const finalistIds = active.length > 0 ? active.map((participant) => participant.id) : parseStringArray(room.lastSurvivorIdsJson);
+    if (finalistIds.length < 2) {
+      throw new Error("동점자 문제는 우승 후보가 2명 이상일 때 필요합니다.");
+    }
+    await selectQuestion(room, category, options.questionId, normalizeSelectionMode(options.selectionMode, room.selectionMode));
+    if (active.length === 0) {
+      await restoreAllWrongFinalists(room);
+    }
   }
 
-  await startPosition(room, next.position, ["revealed"]);
+  await startQuestion(await getRoomOrThrow(code), category, ["revealed"], options);
+}
+
+export async function startRevival(code: string, options: { questionId?: string; selectionMode?: unknown } = {}) {
+  const room = await getRoomOrThrow(code);
+  if (room.status !== "revealed") {
+    throw new Error("정답 공개 후 패자부활전을 열 수 있습니다.");
+  }
+
+  await startQuestion(room, "revival", ["revealed"], options);
 }
 
 export async function createTiebreaker(code: string, input: unknown) {
   const db = getDb();
   const room = await getRoomOrThrow(code);
-  if (room.status !== "revealed" && room.status !== "finished") {
+  if (room.status !== "revealed") {
     throw new Error("정답 공개 후 동점자 문제를 추가할 수 있습니다.");
   }
 
-  await restoreAllWrongFinalists(room);
   const active = await db
     .select()
     .from(participants)
     .where(and(eq(participants.roomCode, code), eq(participants.status, "active")));
-  if (active.length < 2) {
+  const finalistIds = active.length > 0 ? active.map((participant) => participant.id) : parseStringArray(room.lastSurvivorIdsJson);
+  if (finalistIds.length < 2) {
     throw new Error("동점자 문제는 남은 참가자가 2명 이상일 때 필요합니다.");
   }
 
-  const question = validateQuestion(input, 0, true);
+  const question = snapshotQuestion(validateQuestion(input, 0, true));
+  if (active.length === 0) {
+    await restoreAllWrongFinalists(room);
+  }
   const maxPosition = await db
     .select({ value: sql<number>`coalesce(max(${roomQuestions.position}), -1)` })
     .from(roomQuestions)
@@ -658,11 +886,58 @@ export async function createTiebreaker(code: string, input: unknown) {
     id: randomId("rq_"),
     roomCode: code,
     position,
-    questionJson: JSON.stringify({ ...question, isTiebreaker: true }),
+    questionJson: JSON.stringify({ ...question, category: "tiebreaker", isTiebreaker: true }),
+    category: "tiebreaker",
+    usedAt: null,
     isTiebreaker: true,
     createdAt: now(),
   });
-  await startPosition(room, position, ["revealed", "finished"]);
+  const inserted = await db.query.roomQuestions.findFirst({
+    where: and(eq(roomQuestions.roomCode, code), eq(roomQuestions.position, position)),
+  });
+  await startQuestion(room, "tiebreaker", ["revealed"], { questionId: inserted?.id });
+}
+
+export async function finishRoom(code: string) {
+  const room = await getRoomOrThrow(code);
+  if (room.status !== "revealed" && room.status !== "question" && room.status !== "closed") {
+    throw new Error("정답 공개 후 게임을 마무리할 수 있습니다.");
+  }
+  if (room.status !== "revealed") {
+    throw new Error("현재 문제를 공개한 뒤 마무리할 수 있습니다.");
+  }
+
+  const timestamp = now();
+  const active = await getDb()
+    .select()
+    .from(participants)
+    .where(and(eq(participants.roomCode, code), eq(participants.status, "active")));
+
+  if (active.length === 1) {
+    await getDb()
+      .update(participants)
+      .set({ status: "winner" })
+      .where(eq(participants.id, active[0].id));
+  } else if (active.length > 1) {
+    throw new Error("우승자를 가리려면 동점자 문제가 필요합니다.");
+  } else {
+    const lastSurvivorIds = parseStringArray(room.lastSurvivorIdsJson);
+    if (lastSurvivorIds.length === 1) {
+      await getDb()
+        .update(participants)
+        .set({ status: "winner", eliminatedRound: null })
+        .where(and(eq(participants.roomCode, code), eq(participants.id, lastSurvivorIds[0])));
+    } else if (lastSurvivorIds.length > 1) {
+      throw new Error("우승자를 가리려면 동점자 문제가 필요합니다.");
+    } else {
+      throw new Error("우승자를 정할 수 없습니다.");
+    }
+  }
+
+  await getDb()
+    .update(rooms)
+    .set({ status: "finished", acceptingAnswers: false, endedAt: timestamp, updatedAt: timestamp })
+    .where(eq(rooms.code, code));
 }
 
 export async function getRoomState(code: string, role: Role, playerToken?: string | null) {
@@ -689,7 +964,37 @@ export async function getRoomState(code: string, role: Role, playerToken?: strin
   const ranking = rankings(participantRows);
   const participantMap = new Map(participantRows.map((participant) => [participant.id, participant]));
   const activeCount = participantRows.filter((participant) => participant.status === "active").length;
+  const eligibleIds = parseStringArray(room.currentEligibleJson);
+  const eligibleSet = new Set(eligibleIds);
+  const lastSurvivorIds = parseStringArray(room.lastSurvivorIdsJson);
+  const zeroSurvivorAfterReveal = room.status === "revealed" && activeCount === 0;
   const winner = ranking.find((participant) => participant.status === "winner") ?? null;
+  const playerEligible = me ? eligibleSet.has(me.id) : false;
+  const playerCanSubmit = Boolean(me && playerEligible && room.status === "question" && room.acceptingAnswers);
+  const allRoomQuestions = host
+    ? await db.select().from(roomQuestions).where(eq(roomQuestions.roomCode, code)).orderBy(asc(roomQuestions.position))
+    : [];
+  const availableQuestions = host
+    ? allRoomQuestions.filter((row) => row.usedAt === null).reduce<Partial<Record<QuestionCategory, Array<Question & { used: boolean; usedAt?: string; position: number }>>>>(
+        (groups, row) => {
+          const parsed = parseQuestion(row.questionJson);
+          const category = questionCategory(parsed, row);
+          const current = groups[category] ?? [];
+          current.push({
+            ...parsed,
+            id: row.id,
+            category,
+            isTiebreaker: category === "tiebreaker",
+            used: Boolean(row.usedAt),
+            usedAt: iso(row.usedAt),
+            position: row.position,
+          });
+          groups[category] = current;
+          return groups;
+        },
+        {}
+      )
+    : undefined;
 
   const visibleAnswers =
     host
@@ -740,27 +1045,46 @@ export async function getRoomState(code: string, role: Role, playerToken?: strin
       code: room.code,
       phase: room.status,
       joinLocked: room.status !== "lobby",
-      currentQuestionIndex: room.currentPosition ?? undefined,
+      currentQuestionIndex: room.roundNumber > 0 ? room.roundNumber - 1 : undefined,
+      currentPosition: room.currentPosition ?? undefined,
+      currentPool: room.currentCategory,
+      selectionMode: room.selectionMode,
+      playMode: room.selectionMode,
       acceptingAnswers: room.acceptingAnswers,
       roundNumber: room.roundNumber,
       maxParticipants: MAX_PARTICIPANTS,
       participantCount: participantRows.length,
       activeCount,
-      submittedCount: answerRows.length,
-      needsTiebreaker: room.status === "revealed" && activeCount === 0,
+      submittedCount: answerRows.filter((answer) => eligibleSet.has(answer.participantId)).length,
+      needsTiebreaker: zeroSurvivorAfterReveal && lastSurvivorIds.length > 1,
     },
     quiz,
-    participants: participantRows.map((participant) => participantPublic(participant)),
-    currentQuestion: question ? (host ? question : publicQuestion(question, reveal)) : null,
-    currentQuestionIndex: room.currentPosition ?? undefined,
+    participants: participantRows.map((participant) =>
+      participantPublic(participant, undefined, {
+        eligibleForRound: eligibleSet.has(participant.id),
+        canSubmit: eligibleSet.has(participant.id) && room.status === "question" && room.acceptingAnswers,
+      })
+    ),
+    availableQuestions,
+    currentQuestion: question
+      ? (host
+          ? { ...question, id: questionRow?.id, category: questionCategory(question, questionRow ?? undefined) }
+          : publicQuestion({ ...question, id: questionRow?.id, category: questionCategory(question, questionRow ?? undefined) }, reveal))
+      : null,
+    currentQuestionIndex: room.roundNumber > 0 ? room.roundNumber - 1 : undefined,
     answers: visibleAnswers,
     ranking,
-    me: me ? participantPublic(me) : undefined,
+    me: me
+      ? participantPublic(me, undefined, {
+          eligibleForRound: playerEligible,
+          canSubmit: playerCanSubmit,
+        })
+      : undefined,
     myAnswer,
     winner,
     message:
-      room.status === "revealed" && activeCount === 0
-        ? "모든 참가자가 탈락했습니다. 타이브레이커 문제가 필요합니다."
+      zeroSurvivorAfterReveal
+        ? "생존자가 없습니다. 패자부활전을 열거나 게임을 마무리하세요."
         : undefined,
   };
 }
